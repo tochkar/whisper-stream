@@ -36,13 +36,20 @@ def transcribe_audio(audio_data, sample_rate):
     input_features = processor(audio_data, sampling_rate=sample_rate, return_tensors="pt").input_features.to(device).to(torch.float16)
     
     # Генерация предсказаний с увеличением max_length
-    predicted_ids = model.generate(input_features, max_length=512)
+    predicted_ids = model.generate(
+    input_features,
+    max_length=1024,
+    do_sample=True,
+    temperature=1.5,  # Уточните температуру выше 1.0 для более широкого выбора
+    top_k=50,  # Позволит модели выбрать больше возможных слов вместо наиболее вероятных
+    top_p=0.15  # Оставить более вероятные слова, но с большей свободой
+)
     transcription = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
     
     print(f"Transcription: {transcription}")
 
 # URL вашего аудиопотока
-stream_url = "https://stream2.datacenter.by/radiusfm_main"
+stream_url = "https://media.govoritmoskva.ru/radio/rufm.mp3"
 
 # Использование ffmpeg для декодирования аудиопотока
 process = (
@@ -54,7 +61,7 @@ process = (
 
 try:
     while True:
-        in_bytes = process.stdout.read(4096)
+        in_bytes = process.stdout.read(64000)
         if not in_bytes:
             break
         audio_data = np.frombuffer(in_bytes, np.int16)
