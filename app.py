@@ -36,6 +36,8 @@ def transcribe_audio(audio_data, sample_rate):
     input_features = processor(audio_data, sampling_rate=sample_rate, return_tensors="pt").input_features.to(device)
     predicted_ids = model.generate(input_features)
     transcription = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
+    
+    # Печать транскрипции в консоль
     print(f"Transcription: {transcription}")
 
 # URL вашего аудиопотока
@@ -46,7 +48,7 @@ process = (
     ffmpeg
     .input(stream_url, threads=0)
     .output('pipe:', format='wav', acodec='pcm_s16le', ac=1, ar='16000')
-    .run_async(pipe_stdout=True, pipe_stderr=True, bufsize=10**8)
+    .run_async(pipe_stdout=True, pipe_stderr=True)
 )
 
 try:
