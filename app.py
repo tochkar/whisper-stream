@@ -32,8 +32,11 @@ tokenizer = WhisperTokenizer.from_pretrained(MODEL_NAME, language="ru", task="tr
 
 # Функция для обработки аудиоданных
 def transcribe_audio(audio_data, sample_rate):
+    # Нормализуем данные и преобразуем их в float32
     audio_data = (audio_data / np.max(np.abs(audio_data), axis=0)).astype(np.float32)
-    input_features = processor(audio_data, sampling_rate=sample_rate, return_tensors="pt").input_features.to(device)
+
+    # Преобразуем данные в формат для модели и переводим в float16
+    input_features = processor(audio_data, sampling_rate=sample_rate, return_tensors="pt").input_features.to(device).to(torch.float16)
     predicted_ids = model.generate(input_features)
     transcription = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
     
