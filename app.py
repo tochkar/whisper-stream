@@ -41,7 +41,7 @@ def transcribe_audio(audio_data, sample_rate):
     max_length=1024,
     do_sample=True,
     temperature=1.5,  # Уточните температуру выше 1.0 для более широкого выбора
-    top_k=50,  # Позволит модели выбрать больше возможных слов вместо наиболее вероятных
+    top_k=100,  # Позволит модели выбрать больше возможных слов вместо наиболее вероятных
     top_p=0.15  # Оставить более вероятные слова, но с большей свободой
 )
     transcription = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
