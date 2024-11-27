@@ -39,7 +39,7 @@ def transcribe_audio(audio_data, sample_rate):
     print(f"Transcription: {transcription}")
 
 # URL вашего аудиопотока
-stream_url = "http://your-audio-stream-url"
+stream_url = "https://stream2.datacenter.by/radiusfm_main"
 
 # Использование ffmpeg для декодирования аудиопотока
 process = (
