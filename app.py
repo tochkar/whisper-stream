@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Получить токен из переменной окружения
-huggingface_token = os.environ['HUGGINGFACE_TOKEN']
+huggingface_token = os.environ['HF_TOKEN']
 
 # Настройки устройства и модели
 device = "cuda" if torch.cuda.is_available() else "cpu"
