@@ -32,15 +32,13 @@ tokenizer = WhisperTokenizer.from_pretrained(MODEL_NAME, language="ru", task="tr
 
 # Функция для обработки аудиоданных
 def transcribe_audio(audio_data, sample_rate):
-    # Нормализуем данные и преобразуем их в float32
     audio_data = (audio_data / np.max(np.abs(audio_data), axis=0)).astype(np.float32)
-
-    # Преобразуем данные в формат для модели и переводим в float16
     input_features = processor(audio_data, sampling_rate=sample_rate, return_tensors="pt").input_features.to(device).to(torch.float16)
-    predicted_ids = model.generate(input_features)
+    
+    # Генерация предсказаний с увеличением max_length
+    predicted_ids = model.generate(input_features, max_length=512)
     transcription = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
     
-    # Печать транскрипции в консоль
     print(f"Transcription: {transcription}")
 
 # URL вашего аудиопотока
@@ -56,7 +54,7 @@ process = (
 
 try:
     while True:
-        in_bytes = process.stdout.read(4096)  # Читаем 4096 байт из потока
+        in_bytes = process.stdout.read(4096)
         if not in_bytes:
             break
         audio_data = np.frombuffer(in_bytes, np.int16)
