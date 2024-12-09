@@ -41,7 +41,8 @@ def transcribe_audio(audio_data, sample_rate):
         do_sample=True,
         temperature=1.5,
         top_k=100,
-        top_p=0.15
+        top_p=0.15,
+        no_repeat_ngram_size=2
     )
     
     transcription = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
