@@ -69,7 +69,7 @@ def on_message(client, userdata, msg):
             # Декодируем base64
             audio_bytes = base64.b64decode(audio_b64)
             
-            tmp_file = "temp_audio.mp3"
+            tmp_file = "audio.mp3"
             with open(tmp_file, "wb") as f:
                 f.write(audio_bytes)
 
