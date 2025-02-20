@@ -25,6 +25,7 @@ tokenizer = WhisperTokenizer.from_pretrained(
     MODEL_NAME, language="ru", task="transcribe", token=huggingface_token
 )
 
+
 def transcribe_audio(audio_file):
     process = (
         ffmpeg.input(audio_file)
@@ -36,7 +37,8 @@ def transcribe_audio(audio_file):
     audio_data = np.frombuffer(audio_buffer, np.int16)
 
     audio_data = (audio_data / np.max(np.abs(audio_data), axis=0)).astype(np.float32)
-    input_features = processor(audio_data, sampling_rate=16000, return_tensors="pt").input_features.to(device).to(torch.float16)
+    input_features = processor(audio_data, sampling_rate=16000, return_tensors="pt").input_features.to(device).to(
+        torch.float16)
     predicted_ids = model.generate(
         input_features,
         max_length=1024,
@@ -50,9 +52,10 @@ def transcribe_audio(audio_file):
     print(f"Transcription: {transcription}")
     return transcription
 
+
 def extract_addresses(text):
     # Инициализация клиента OpenAI
-    openai.api_key = openai_api_key
+    client = OpenAI(api_key=openai_api_key)
 
     # Формируем запрос
     prompt = (
@@ -62,18 +65,19 @@ def extract_addresses(text):
     )
 
     # Запрос к GPT
-    response = openai.Completion.create(
-        engine="davinci",
-        prompt=prompt,
+    response = client.chat.completions.create(
+        model='gpt-4o',
+        messages=[{"role": "system", "content": prompt}],
         max_tokens=100,
         n=1,
         stop=None,
         temperature=0.3,
     )
 
-    address_info = response.choices[0].text.strip()
+    address_info = response.choices[0].message.content.strip().lower()
     print(f"Extracted Addresses: {address_info}")
     return address_info
+
 
 def main():
     audio_file = "speech.mp3"  # файл аудио для транскрибции
@@ -84,6 +88,7 @@ def main():
         # Здесь вы можете сохранить или использовать address_info по вашему усмотрению
     else:
         print(f"Файл {audio_file} не найден.")
+
 
 if __name__ == "__main__":
     main()
