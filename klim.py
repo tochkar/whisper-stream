@@ -4,6 +4,7 @@ import numpy as np
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, WhisperTokenizer
 from dotenv import load_dotenv
 import os
+import time
 
 load_dotenv()
 huggingface_token = os.environ['HF_TOKEN']
@@ -46,6 +47,7 @@ class FreeswitchAMI:
         self.overlap_size = 8000 * 0.5  # 0.5 секунды перекрытия
         print(f"Размер буфера: {self.buffer_size} байт")
         print(f"Размер перекрытия: {self.overlap_size} байт")
+        self.is_call_active = False
 
     def connect(self):
         try:
@@ -61,8 +63,17 @@ class FreeswitchAMI:
             auth_response = self.socket.recv(1024).decode()
             print(f"Auth response: {auth_response}")
 
-            # Подписываемся только на нужные события
-            self.socket.send("event plain CHANNEL_ANSWER CHANNEL_HANGUP\n\n".encode())
+            # Расширенная подписка на события
+            events = [
+                "CHANNEL_ANSWER",
+                "CHANNEL_HANGUP",
+                "CHANNEL_AUDIO",
+                "MEDIA_BUG_START",
+                "MEDIA_BUG_STOP",
+                "RECORD_START",
+                "RECORD_STOP"
+            ]
+            self.socket.send(f"event plain {' '.join(events)}\n\n".encode())
             response = self.socket.recv(1024).decode()
             print(f"Subscribe response: {response}")
 
@@ -74,10 +85,15 @@ class FreeswitchAMI:
     def start_audio_stream(self, call_uuid):
         try:
             print(f"\nПодключаемся к аудио потоку звонка: {call_uuid}")
-            # Отправляем команды для получения аудио
+            self.is_call_active = True
+            
             commands = [
+                f"uuid_break {call_uuid}\n\n",
                 f"uuid_audio {call_uuid} start\n\n",
-                f"uuid_dump {call_uuid} on\n\n"
+                f"uuid_dump {call_uuid} on\n\n",
+                f"uuid_debug_media {call_uuid} on\n\n",
+                f"uuid_media {call_uuid}\n\n",
+                f"uuid_send_media {call_uuid} audio RTP\n\n"
             ]
 
             for command in commands:
@@ -85,9 +101,17 @@ class FreeswitchAMI:
                 self.socket.send(command.encode())
                 response = self.socket.recv(4096)
                 try:
-                    print(f"Ответ: {response.decode().strip()}")
+                    decoded_response = response.decode().strip()
+                    print(f"Ответ: {decoded_response}")
                 except:
                     print(f"Получен бинарный ответ размером {len(response)} байт")
+                time.sleep(0.5)
+
+            # Проверка статуса аудио
+            status_command = f"uuid_getvar {call_uuid} rtp_has_audio\n\n"
+            self.socket.send(status_command.encode())
+            status_response = self.socket.recv(4096)
+            print(f"Статус аудио: {status_response.decode().strip()}")
 
             print("Аудио поток запущен, ожидаем данные...")
             
@@ -97,6 +121,9 @@ class FreeswitchAMI:
             print(traceback.format_exc())
 
     def transcribe_audio(self, audio_bytes):
+        if not self.is_call_active:
+            return
+
         try:
             print("\n--- Начало обработки аудио фрагмента ---")
             print(f"Размер фрагмента: {len(audio_bytes)} байт")
@@ -162,6 +189,7 @@ class FreeswitchAMI:
                         
                         if event_data:
                             event_name = event_data.get('Event-Name')
+                            print(f"\nСобытие: {event_name}")
                             
                             if event_name == 'CHANNEL_ANSWER':
                                 call_uuid = event_data.get('Unique-ID')
@@ -173,17 +201,19 @@ class FreeswitchAMI:
 
                             elif event_name == 'CHANNEL_HANGUP':
                                 print("\nЗвонок завершен")
+                                self.is_call_active = False
                                 self.audio_buffer.clear()
 
                     except UnicodeDecodeError:
                         # Это аудио данные
-                        self.audio_buffer.extend(event)
-                        print(f"\rРазмер буфера: {len(self.audio_buffer)}/{self.buffer_size}", end="")
-                        
-                        if len(self.audio_buffer) >= self.buffer_size:
-                            print("\nБуфер заполнен, начинаем транскрипцию...")
-                            self.transcribe_audio(bytes(self.audio_buffer))
-                            self.audio_buffer = self.audio_buffer[-int(self.overlap_size):]
+                        if self.is_call_active:
+                            self.audio_buffer.extend(event)
+                            print(f"\rРазмер буфера: {len(self.audio_buffer)}/{self.buffer_size}", end="")
+                            
+                            if len(self.audio_buffer) >= self.buffer_size:
+                                print("\nБуфер заполнен, начинаем транскрипцию...")
+                                self.transcribe_audio(bytes(self.audio_buffer))
+                                self.audio_buffer = self.audio_buffer[-int(self.overlap_size):]
 
         except Exception as e:
             print(f"Error in event listener: {e}")
