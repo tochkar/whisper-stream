@@ -11,14 +11,15 @@ huggingface_token = os.environ['HF_TOKEN']
 
 class FreeswitchAMI:
     def __init__(self, host, port, password):
-        # Инициализация подключения к FreeSWITCH
         self.host = host
         self.port = port
         self.password = password
         self.socket = None
         
         # Инициализация Whisper
+        print("Инициализация Whisper модели...")
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Используемое устройство: {self.device}")
         self.torch_dtype = torch.float16
         self.MODEL_NAME = "openai/whisper-large-v3-turbo"
         
@@ -31,21 +32,23 @@ class FreeswitchAMI:
         ).to(self.device)
         
         self.processor = AutoProcessor.from_pretrained(
-            self.MODEL_NAME, 
+            self.MODEL_NAME,
             use_auth_token=huggingface_token
         )
         
         self.tokenizer = WhisperTokenizer.from_pretrained(
-            self.MODEL_NAME, 
-            language="ru", 
-            task="transcribe", 
+            self.MODEL_NAME,
+            language="ru",
+            task="transcribe",
             use_auth_token=huggingface_token
         )
-        
+        print("Модель Whisper инициализирована")
+
         # Буфер для аудио
         self.audio_buffer = bytearray()
         self.buffer_size = 16000 * 4  # 4 секунды
         self.overlap_size = 16000 * 1  # 1 секунда
+        self.active_call_uuid = None
 
     def connect(self):
         try:
@@ -61,7 +64,7 @@ class FreeswitchAMI:
             auth_response = self.socket.recv(1024).decode()
             print(f"Auth response: {auth_response}")
 
-            self.socket.send("event plain CHANNEL_ANSWER\n\n".encode())
+            self.socket.send("event plain all\n\n".encode())
             response = self.socket.recv(1024).decode()
             print(f"Subscribe response: {response}")
 
@@ -70,16 +73,26 @@ class FreeswitchAMI:
             print(f"Connection error: {e}")
             return False
 
-    def transcribe_audio(self, audio_data):
+    def start_recording(self, call_uuid):
         try:
-            # Преобразование байтов в numpy array
-            audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
-            audio_np = audio_np / np.max(np.abs(audio_np))
+            print(f"\nStarting recording for call {call_uuid}")
+            commands = [
+                f"uuid_audio {call_uuid} start\n\n",
+            ]
 
-            # Подготовка входных данных для модели
+            for cmd in commands:
+                self.socket.send(cmd.encode())
+                response = self.socket.recv(4096)
+
+        except Exception as e:
+            print(f"Error starting recording: {e}")
+
+    def transcribe_audio(self, audio_bytes):
+        try:
+            # Напрямую передаем байты в процессор
             input_features = self.processor(
-                audio_np, 
-                sampling_rate=16000, 
+                audio_bytes,
+                sampling_rate=8000,  # Используем частоту дискретизации FreeSWITCH
                 return_tensors="pt"
             ).input_features.to(self.device).to(torch.float16)
 
@@ -96,35 +109,39 @@ class FreeswitchAMI:
 
             # Декодирование результата
             transcription = self.tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
-            print(f"Transcription: {transcription}")
+            if transcription.strip():  # Выводим только если есть текст
+                print(f"Транскрипция: {transcription}")
+                print("-" * 50)
 
         except Exception as e:
             print(f"Error in transcription: {e}")
 
     def listen_events(self):
         try:
+            print("Starting event listener...")
             while True:
                 event = self.socket.recv(4096)
                 if event:
                     try:
-                        # Пробуем декодировать как текстовое событие
                         event_str = event.decode()
                         event_data = self.parse_event(event_str)
                         
                         if event_data:
-                            if (event_data.get('Event-Name') == 'CHANNEL_ANSWER' and 
-                                event_data.get('Channel-Call-State') == 'RINGING'):
-                                print("Обнаружен новый звонок")
-                                
+                            event_name = event_data.get('Event-Name')
+                            
+                            if event_name == 'CHANNEL_ANSWER':
+                                call_uuid = event_data.get('Unique-ID')
+                                print(f"\nНовый звонок: {call_uuid}")
+                                self.active_call_uuid = call_uuid
+                                self.start_recording(call_uuid)
+
                     except UnicodeDecodeError:
-                        # Если не удалось декодировать - это аудио данные
+                        # Аудио данные
                         self.audio_buffer.extend(event)
                         
-                        # Если накопили достаточно данных
                         if len(self.audio_buffer) >= self.buffer_size:
-                            # Транскрибируем накопленный буфер
-                            self.transcribe_audio(self.audio_buffer)
-                            # Оставляем перекрытие
+                            # Передаем байты напрямую в транскрибацию
+                            self.transcribe_audio(bytes(self.audio_buffer))
                             self.audio_buffer = self.audio_buffer[-self.overlap_size:]
 
         except Exception as e:
@@ -159,7 +176,7 @@ def main():
         try:
             ami.listen_events()
         except KeyboardInterrupt:
-            print("\nЗавершение работы...")
+            print("\nShutting down...")
         finally:
             ami.close()
     else:
