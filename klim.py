@@ -61,7 +61,8 @@ class FreeswitchAMI:
             auth_response = self.socket.recv(1024).decode()
             print(f"Auth response: {auth_response}")
 
-            self.socket.send("event plain all\n\n".encode())
+            # Подписываемся только на нужные события
+            self.socket.send("event plain CHANNEL_ANSWER CHANNEL_HANGUP\n\n".encode())
             response = self.socket.recv(1024).decode()
             print(f"Subscribe response: {response}")
 
@@ -73,27 +74,41 @@ class FreeswitchAMI:
     def start_audio_stream(self, call_uuid):
         try:
             print(f"\nПодключаемся к аудио потоку звонка: {call_uuid}")
-            command = f"uuid_audio {call_uuid} start\n\n"
-            self.socket.send(command.encode())
-            response = self.socket.recv(4096)
-            try:
-                print(f"Ответ на команду start_audio_stream: {response.decode()}")
-            except UnicodeDecodeError:
-                print(f"Получен бинарный ответ размером {len(response)} байт")
-            print("Ожидаем поступления аудио потока...")
+            # Отправляем команды для получения аудио
+            commands = [
+                f"uuid_audio {call_uuid} start\n\n",
+                f"uuid_dump {call_uuid} on\n\n"
+            ]
+
+            for command in commands:
+                print(f"Отправка команды: {command.strip()}")
+                self.socket.send(command.encode())
+                response = self.socket.recv(4096)
+                try:
+                    print(f"Ответ: {response.decode().strip()}")
+                except:
+                    print(f"Получен бинарный ответ размером {len(response)} байт")
+
+            print("Аудио поток запущен, ожидаем данные...")
+            
         except Exception as e:
             print(f"Error starting audio stream: {e}")
+            import traceback
+            print(traceback.format_exc())
 
     def transcribe_audio(self, audio_bytes):
         try:
             print("\n--- Начало обработки аудио фрагмента ---")
             print(f"Размер фрагмента: {len(audio_bytes)} байт")
-            print(f"Первые 20 байт (hex): {audio_bytes[:20].hex()}")
 
             # Преобразуем байты в numpy array и нормализуем
             audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             print(f"Форма массива: {audio_np.shape}")
             print(f"Мин/макс значения: {np.min(audio_np):.3f}/{np.max(audio_np):.3f}")
+
+            if np.max(np.abs(audio_np)) < 0.01:
+                print("Слишком тихий сигнал, пропускаем...")
+                return
 
             # Обработка аудио
             print("Обработка через процессор Whisper...")
@@ -102,7 +117,6 @@ class FreeswitchAMI:
                 sampling_rate=8000,
                 return_tensors="pt"
             ).input_features.to(self.device).to(torch.float16)
-            print("Аудио обработано процессором")
 
             # Генерация транскрипции
             print("Генерация транскрипции...")
@@ -115,7 +129,6 @@ class FreeswitchAMI:
                 top_p=0.15,
                 no_repeat_ngram_size=2
             )
-            print("Генерация завершена")
 
             # Декодирование результата
             transcription = self.tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
@@ -140,11 +153,15 @@ class FreeswitchAMI:
                     try:
                         # Пробуем декодировать как текстовое событие
                         event_str = event.decode()
+                        
+                        # Пропускаем RTCP сообщения
+                        if 'RECV_RTCP_MESSAGE' in event_str:
+                            continue
+                            
                         event_data = self.parse_event(event_str)
                         
                         if event_data:
                             event_name = event_data.get('Event-Name')
-                            print(f"\nПолучено событие: {event_name}")
                             
                             if event_name == 'CHANNEL_ANSWER':
                                 call_uuid = event_data.get('Unique-ID')
@@ -154,15 +171,19 @@ class FreeswitchAMI:
                                     print(f"{key}: {event_data.get(key)}")
                                 self.start_audio_stream(call_uuid)
 
+                            elif event_name == 'CHANNEL_HANGUP':
+                                print("\nЗвонок завершен")
+                                self.audio_buffer.clear()
+
                     except UnicodeDecodeError:
-                        # Аудио данные
-                        print(f"\rПолучены аудио данные: {len(event)} байт", end="")
+                        # Это аудио данные
                         self.audio_buffer.extend(event)
+                        print(f"\rРазмер буфера: {len(self.audio_buffer)}/{self.buffer_size}", end="")
                         
                         if len(self.audio_buffer) >= self.buffer_size:
+                            print("\nБуфер заполнен, начинаем транскрипцию...")
                             self.transcribe_audio(bytes(self.audio_buffer))
                             self.audio_buffer = self.audio_buffer[-int(self.overlap_size):]
-                            print(f"Буфер обновлен, новый размер: {len(self.audio_buffer)}")
 
         except Exception as e:
             print(f"Error in event listener: {e}")
