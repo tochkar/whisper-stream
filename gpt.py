@@ -1,29 +1,24 @@
-2import socket
+import socket
 import multiprocessing as mp
 import numpy as np
 import os
-
 from transformers import (
-    AutoModelForSpeechSeq2Seq,
-    AutoProcessor,
-    WhisperTokenizer,
-    AutoTokenizer,
-    AutoModelForCausalLM,
-    pipeline,
+    AutoModelForSpeechSeq2Seq, AutoProcessor, WhisperTokenizer, 
+    AutoTokenizer, AutoModelForCausalLM, pipeline
 )
 from dotenv import load_dotenv
 import torch
 
-##################### Параметры ########################
+################ ПАРАМЕТРЫ ###################
 HOST = "0.0.0.0"
 PORT = 8082
 BUFFER_SIZE = 32000 * 2    # 2 сек для 16kHz 16bit mono
-OVERLAP_SIZE = 32000 // 2  # 0.5 сек перекрытия
+OVERLAP_SIZE = 32000 // 2
 SAMPLE_RATE = 16000
 WHISPER_MODEL = "openai/whisper-large-v3-turbo"
 LANGUAGE = "ru"
 YANDEX_LLM = "yandex/YandexGPT-5-Lite-8B-instruct"
-########################################################
+##############################################
 
 SYSTEM_PROMPT = (
     "Ты ассистент такси Минска. Ты будешь получать фрагменты диалогов между пассажиром и водителем.\n"
@@ -40,45 +35,31 @@ SYSTEM_PROMPT = (
     "\n\n"
     "Некоторые официальные улицы Минска для ориентира: проспект Победителей, улица Ленина, проспект Независимости, улица Якуба Коласа, улица Кальварийская, проспект Машерова, улица Немига, улица Короля, улица Куйбышева, улица Аэродромная."
 )
-########################################################
 
-def build_llm_tokenizer_and_pipeline(huggingface_token):
-    tokenizer = AutoTokenizer.from_pretrained(YANDEX_LLM, use_auth_token=huggingface_token)
-    model = AutoModelForCausalLM.from_pretrained(
-        YANDEX_LLM,
-        use_auth_token=huggingface_token,
-        # quantization_config=...,  # если нужен quantized — раскомментируй и задай config!
-        # device_map="auto",        # если только CPU, можно "cpu"
-    )
-    text_pipe = pipeline(
-        "text-generation",
-        model=model,
-        tokenizer=tokenizer,
-        max_new_tokens=160,
-        device_map="auto"  # или "cpu"
-    )
-    return text_pipe
+def process_text_with_llm(prompt, llm_request_q, llm_response_q, worker_id):
+    # Формируем задание и ждём с владельческим ID, чтобы не перепутать ответы разных воркеров
+    request_id = (os.getpid(), worker_id, np.random.randint(0, 1e9))
+    llm_request_q.put((request_id, prompt))
+    while True:
+        resp_id, result = llm_response_q.get()
+        if resp_id == request_id:
+            return result
 
-def handle_client_proc(conn, addr, huggingface_token):
+def handle_client_proc(conn, addr, huggingface_token, llm_request_q, llm_response_q, worker_id):
     print(f"[{addr}] Новый процесс обработчика клиента")
     try:
-        # Whisper
         device = "cuda" if torch.cuda.is_available() else "cpu"
         torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
         model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            WHISPER_MODEL,
-            torch_dtype=torch_dtype,
-            use_auth_token=huggingface_token
+            WHISPER_MODEL, torch_dtype=torch_dtype, token=huggingface_token
         ).to(device)
-        processor = AutoProcessor.from_pretrained(WHISPER_MODEL, use_auth_token=huggingface_token)
+        processor = AutoProcessor.from_pretrained(WHISPER_MODEL, token=huggingface_token)
         tokenizer = WhisperTokenizer.from_pretrained(
-            WHISPER_MODEL, language=LANGUAGE, task="transcribe", use_auth_token=huggingface_token
+            WHISPER_MODEL, language=LANGUAGE, task="transcribe", token=huggingface_token
         )
 
-        # LLM pipeline
-        text_pipe = build_llm_tokenizer_and_pipeline(huggingface_token)
-
         def transcribe_audio(audio_data):
+            # Нормализация
             if np.max(np.abs(audio_data)) != 0:
                 audio_data = (audio_data / np.max(np.abs(audio_data))).astype(np.float32)
             else:
@@ -96,12 +77,10 @@ def handle_client_proc(conn, addr, huggingface_token):
             transcription = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
             print(f"[{addr}] Транскрипция: {transcription}")
 
-            # Формируем prompt
+            # ------- Вызываем LLM через очередь ------
             prompt = f"<s>[INST]{SYSTEM_PROMPT}\n{transcription}[/INST]"
-            llm_response = text_pipe(prompt)[0]['generated_text']
+            llm_response = process_text_with_llm(prompt, llm_request_q, llm_response_q, worker_id)
             print(f"[{addr}] LLM результат:\n{llm_response}")
-            # Передача клиенту при необходимости:
-            # conn.sendall(llm_response.encode('utf-8'))
 
         audio_buffer = bytearray()
         with conn:
@@ -121,17 +100,57 @@ def handle_client_proc(conn, addr, huggingface_token):
         conn.close()
         print(f"[{addr}] Завершение сессии")
 
+def llm_worker(llm_request_q, llm_response_q, huggingface_token):
+    print("LLM: Загружаю модель (один раз на сервер)...")
+    tokenizer = AutoTokenizer.from_pretrained(YANDEX_LLM, token=huggingface_token)
+    model = AutoModelForCausalLM.from_pretrained(
+        YANDEX_LLM, token=huggingface_token
+    )
+    text_pipe = pipeline(
+        "text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        max_new_tokens=160,
+        device_map="auto"
+    )
+    print("LLM: Модель готова к работе!")
+    while True:
+        request = llm_request_q.get()
+        if request is None:
+            break
+        request_id, prompt = request
+        try:
+            output = text_pipe(prompt)[0]['generated_text']
+        except Exception as e:
+            output = f"LLM error: {e}"
+        llm_response_q.put((request_id, output))
+
 def main():
     load_dotenv()
     huggingface_token = os.environ['HF_TOKEN']
+
+    llm_request_q = mp.Queue()
+    llm_response_q = mp.Queue()
+
+    # Запускаем LLM-процесс (ОДИН раз)
+    llm_proc = mp.Process(target=llm_worker, args=(llm_request_q, llm_response_q, huggingface_token), daemon=True)
+    llm_proc.start()
+
     print(f"Запуск сервера на {HOST}:{PORT}")
+    worker_id = 0
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
         server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_sock.bind((HOST, PORT))
         server_sock.listen(32)
         while True:
             conn, addr = server_sock.accept()
-            proc = mp.Process(target=handle_client_proc, args=(conn, addr, huggingface_token), daemon=True)
+            # Генерируем уникальный worker_id для корректных ответов очереди
+            worker_id += 1
+            proc = mp.Process(
+                target=handle_client_proc,
+                args=(conn, addr, huggingface_token, llm_request_q, llm_response_q, worker_id),
+                daemon=True
+            )
             proc.start()
 
 if __name__ == '__main__':
