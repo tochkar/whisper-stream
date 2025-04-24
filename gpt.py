@@ -4,7 +4,7 @@ import numpy as np
 import os
 from transformers import (
     AutoModelForSpeechSeq2Seq, AutoProcessor, WhisperTokenizer, 
-    AutoTokenizer, AutoModelForCausalLM, pipeline
+    AutoTokenizer, AutoModelForCausalLM, pipeline, BitsAndBytesConfig
 )
 from dotenv import load_dotenv
 import torch
@@ -19,6 +19,13 @@ WHISPER_MODEL = "openai/whisper-large-v3-turbo"
 LANGUAGE = "ru"
 YANDEX_LLM = "yandex/YandexGPT-5-Lite-8B-instruct"
 ##############################################
+
+quant_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type='nf4',  # наилучшее качество quantization для LLM
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_compute_dtype='float16',
+)
 
 SYSTEM_PROMPT = (
     "Ты ассистент такси Минска. Ты будешь получать фрагменты диалогов между пассажиром и водителем.\n"
@@ -104,7 +111,7 @@ def llm_worker(llm_request_q, llm_response_q, huggingface_token):
     print("LLM: Загружаю модель (один раз на сервер)...")
     tokenizer = AutoTokenizer.from_pretrained(YANDEX_LLM, token=huggingface_token)
     model = AutoModelForCausalLM.from_pretrained(
-        YANDEX_LLM, token=huggingface_token
+        YANDEX_LLM, token=huggingface_token, quantization_config=quant_config, device_map="auto"
     )
     text_pipe = pipeline(
         "text-generation",
