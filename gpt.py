@@ -1,4 +1,4 @@
-import socket
+2import socket
 import multiprocessing as mp
 import numpy as np
 import os
@@ -16,7 +16,7 @@ import torch
 
 ##################### Параметры ########################
 HOST = "0.0.0.0"
-PORT = 8084
+PORT = 8082
 BUFFER_SIZE = 32000 * 2    # 2 сек для 16kHz 16bit mono
 OVERLAP_SIZE = 32000 // 2  # 0.5 сек перекрытия
 SAMPLE_RATE = 16000
