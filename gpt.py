@@ -6,12 +6,13 @@ from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, WhisperTokeni
 from dotenv import load_dotenv
 import torch
 
-# ! Главное — вот тут:
+# Natasha and pymorphy2
 from natasha import AddrExtractor
+from pymorphy2 import MorphAnalyzer
 
 ##################### Параметры ########################
 HOST = "0.0.0.0"
-PORT = 8084
+PORT = 8082
 BUFFER_SIZE = 32000 * 2    # 2 сек для 16kHz 16bit mono
 OVERLAP_SIZE = 32000 // 2  # 0.5 сек перекрытия
 SAMPLE_RATE = 16000
@@ -19,11 +20,15 @@ MODEL_NAME = "openai/whisper-large-v3-turbo"
 LANGUAGE = "ru"
 ########################################################
 
+# ---- Морфанализатор инициализируем один раз глобально ----
+print("Инициализация морфологического анализатора Natasha ...")
+morph = MorphAnalyzer()
+print("Морфанализатор создан.")
+
 def handle_client_proc(conn, addr, huggingface_token):
     print(f"[{addr}] Новый процесс обработчика клиента")
-
-    # ЭКСТРАКТОР для НАДАШИ!
-    addr_extractor = AddrExtractor()
+    # Используем глобальный morph
+    addr_extractor = AddrExtractor(morph)
 
     try:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -56,11 +61,11 @@ def handle_client_proc(conn, addr, huggingface_token):
             transcription = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
             print(f"[{addr}] Транскрипция: {transcription}")
 
-            # --- вот тут НАТАША! ---
+            # ---- Используем Natasha для поиска адресов ----
             matches = addr_extractor(transcription)
             for match in matches:
-                print(f"[{addr}] НАЙДЕН АДРЕС НАТАШЕЙ: {match.fact}")  # адрес как объект
-                print(f"[{addr}] В ТЕКСТЕ: {transcription[match.span[0]:match.span[1]]}")  # как строка
+                print(f"[{addr}] НАЙДЕН АДРЕС НАТАШЕЙ: {match.fact}")
+                print(f"[{addr}] В ТЕКСТЕ: {transcription[match.span[0]:match.span[1]]}")
 
         audio_buffer = bytearray()
         with conn:
