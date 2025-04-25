@@ -10,8 +10,8 @@ import torch
 # ============== Параметры ==================
 HOST = "0.0.0.0"
 PORT = 8084
-BUFFER_SIZE = 32000 * 2    # 2 сек для 16kHz 16bit mono
-OVERLAP_SIZE = 32000 // 2  # 0.5 сек перекрытия
+BUFFER_SIZE = 48000 * 2    # 2 сек для 16kHz 16bit mono
+OVERLAP_SIZE = 48000 // 2  # 0.5 сек перекрытия
 SAMPLE_RATE = 16000
 MODEL_NAME = "openai/whisper-large-v3-turbo"
 LANGUAGE = "ru"
