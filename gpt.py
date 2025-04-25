@@ -97,8 +97,6 @@ def handle_client_proc(conn, addr, huggingface_token):
             address_str = get_address_string_from_text(transcription, ner_pipe)
             if address_str:
                 print(f"[{addr}] Адрес найден: {address_str}")
-            else:
-                print(f"[{addr}] Адрес не найден в этом фрагменте.")
         audio_buffer = bytearray()
         with conn:
             while True:
