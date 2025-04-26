@@ -1,4 +1,5 @@
 import inspect
+# --- Shim для Python 3.11+/3.12+, чтобы pymorphy2 работал с getargspec ---
 if not hasattr(inspect, 'getargspec'):
     def getargspec(func):
         from collections import namedtuple
@@ -26,7 +27,7 @@ from rapidfuzz import fuzz, process
 import pymorphy2
 import re
 
-##### Параметры
+##################### Параметры ########################
 HOST = "0.0.0.0"
 PORT = 8082
 BUFFER_SIZE = 48000 * 2
@@ -39,25 +40,10 @@ NER_ATTRS = ["Street", "House", "Building"]
 STREETS_FILE = "minsk_unique_streets2.txt"
 OBJECT_MAPPING_FILE = "important_objects_mapping.txt"
 NUMERALS_FILE = "russian_numerals.txt"
+########################################################
 
 morph = pymorphy2.MorphAnalyzer()
 
-############ Глобальные (используются во всех worker-процессах!) ############
-ASR_MODEL = None
-ASR_PROCESSOR = None
-ASR_TOKENIZER = None
-NER_MODEL_OBJ = None   # чтобы не конфликтовать с NER_MODEL (str)
-NER_TOKENIZER = None
-NER_PIPE = None
-STREETS_ORIGINAL = None
-STREETS_LOWER = None
-OBJ_MAPPING = None
-OBJ_VARIANTS = None
-OBJ_CANONS = None
-NUM_WORDS = None
-OBJ_PATTERNS = None
-
-############### Вспомогательные функции ###################
 def load_streets_dict(filepath):
     original, lowered = [], []
     with open(filepath, encoding="utf-8") as f:
@@ -77,6 +63,7 @@ def load_dict(filepath, sep=":"):
                 d[k.strip()] = int(v.strip())
     return d
 
+# --- Загрузка маппинга вариантов важных мест ---
 def load_object_canon_mapping(filepath):
     mapping = {}
     variants = set()
@@ -93,6 +80,7 @@ def load_object_canon_mapping(filepath):
             canons.add(c)
     return mapping, variants, canons
 
+# --- Быстрый поиск канонического важного объекта ---
 def find_canonical_object(text, mapping, variants):
     text_low = text.lower()
     for variant in sorted(variants, key=len, reverse=True):
@@ -141,6 +129,7 @@ def extract_selected_attributes(entities, attributes=None):
                     attr_map[label] = (prev_word + " / " + word, prev_score)
     return attr_map
 
+# Паттерны для больниц, поликлиник и др. с номерами (из canons!)
 def build_special_object_patterns(canons):
     objpat = '|'.join([re.escape(x) for x in sorted(canons, key=len, reverse=True)])
     numpat = r'(\d+|[а-яё\- ]+)'
@@ -186,6 +175,7 @@ def find_special_object(text, patterns, NUM_WORDS, canons_set=None):
     words = text_low.split()
     lemmas = [lemmatize_word(w) for w in words]
     if canons_set is not None:
+        # num + obj
         for i in range(len(words) - 1):
             obj_candidate = lemmas[i+1]
             num_candidate = extract_number(words[i], NUM_WORDS)
@@ -193,6 +183,7 @@ def find_special_object(text, patterns, NUM_WORDS, canons_set=None):
                 obj_lemma = lemmatize_word(obj)
                 if obj_candidate == obj_lemma and num_candidate:
                     return f"{obj} {num_candidate}"
+        # obj + num
         for i in range(len(words) - 1):
             obj_candidate = lemmas[i]
             num_candidate = extract_number(words[i+1], NUM_WORDS)
@@ -200,6 +191,7 @@ def find_special_object(text, patterns, NUM_WORDS, canons_set=None):
                 obj_lemma = lemmatize_word(obj)
                 if obj_candidate == obj_lemma and num_candidate:
                     return f"{obj} {num_candidate}"
+        # Просто объект
         for i, lemma in enumerate(lemmas):
             for obj in canons_set:
                 if lemma == lemmatize_word(obj):
@@ -219,56 +211,36 @@ def find_special_object(text, patterns, NUM_WORDS, canons_set=None):
                     return f"{obj_type} {num_raw}"
     return None
 
-############## Загрузка всех моделей один раз при запуске #################
-def model_preload(huggingface_token):
-    global ASR_MODEL, ASR_PROCESSOR, ASR_TOKENIZER
-    global NER_MODEL_OBJ, NER_TOKENIZER, NER_PIPE
-    global STREETS_ORIGINAL, STREETS_LOWER, OBJ_MAPPING, OBJ_VARIANTS, OBJ_CANONS
-    global NUM_WORDS, OBJ_PATTERNS
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-    print("[SERVER] Загружаем ASR-модель Whisper")
-    ASR_MODEL = AutoModelForSpeechSeq2Seq.from_pretrained(
-        MODEL_NAME,
-        torch_dtype=torch_dtype,
-        token=huggingface_token
-    ).to(device)
-    ASR_PROCESSOR = AutoProcessor.from_pretrained(MODEL_NAME, token=huggingface_token)
-    ASR_TOKENIZER = WhisperTokenizer.from_pretrained(
-        MODEL_NAME, language=LANGUAGE, task="transcribe", token=huggingface_token
-    )
-    print("[SERVER] Загружаем Address-NER модель")
-    NER_TOKENIZER = AutoTokenizer.from_pretrained(NER_MODEL, token=huggingface_token)
-    NER_MODEL_OBJ = AutoModelForTokenClassification.from_pretrained(NER_MODEL, token=huggingface_token)
-    pipeline_device = 0 if torch.cuda.is_available() else -1
-    NER_PIPE = pipeline(
-        "ner",
-        model=NER_MODEL_OBJ,
-        tokenizer=NER_TOKENIZER,
-        aggregation_strategy="simple",
-        device=pipeline_device
-    )
-    print("[SERVER] Грузим справочники и паттерны...")
-    STREETS_ORIGINAL, STREETS_LOWER = load_streets_dict(STREETS_FILE)
-    OBJ_MAPPING, OBJ_VARIANTS, OBJ_CANONS = load_object_canon_mapping(OBJECT_MAPPING_FILE)
-    NUM_WORDS = load_dict(NUMERALS_FILE)
-    OBJ_PATTERNS = build_special_object_patterns(OBJ_CANONS)
-    print("[SERVER] [OK] Все модели и справочники загружены.")
-
-############### Работа с клиентом: используем загруженные модели! #############
-def handle_client_proc(conn, addr):
+def handle_client_proc(conn, addr, huggingface_token):
+    print(f"[{addr}] Новый процесс обработчика клиента")
     try:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-
+        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            MODEL_NAME,
+            torch_dtype=torch_dtype,
+            use_auth_token=huggingface_token
+        ).to(device)
+        processor = AutoProcessor.from_pretrained(MODEL_NAME, use_auth_token=huggingface_token)
+        tokenizer = WhisperTokenizer.from_pretrained(
+            MODEL_NAME, language=LANGUAGE, task="transcribe", use_auth_token=huggingface_token
+        )
+        print(f"[{addr}] Загружаем Address-NER модель...")
+        ner_tokenizer = AutoTokenizer.from_pretrained(NER_MODEL, token=huggingface_token)
+        ner_model = AutoModelForTokenClassification.from_pretrained(NER_MODEL, token=huggingface_token)
+        ner_pipe = pipeline("ner", model=ner_model, tokenizer=ner_tokenizer, aggregation_strategy="simple")
+        print(f"[{addr}] Address-NER загружена.")
+        streets_original, streets_lower = load_streets_dict(STREETS_FILE)
+        obj_mapping, obj_variants, obj_canons = load_object_canon_mapping(OBJECT_MAPPING_FILE)
+        NUM_WORDS = load_dict(NUMERALS_FILE)
+        obj_patterns = build_special_object_patterns(obj_canons)
         def transcribe_audio(audio_data):
             if np.max(np.abs(audio_data)) != 0:
                 audio_data = (audio_data / np.max(np.abs(audio_data))).astype(np.float32)
             else:
                 audio_data = audio_data.astype(np.float32)
-            input_features = ASR_PROCESSOR(audio_data, sampling_rate=SAMPLE_RATE, return_tensors="pt").input_features.to(device).to(torch_dtype)
-            predicted_ids = ASR_MODEL.generate(
+            input_features = processor(audio_data, sampling_rate=SAMPLE_RATE, return_tensors="pt").input_features.to(device).to(torch_dtype)
+            predicted_ids = model.generate(
                 input_features,
                 max_length=1024,
                 do_sample=True,
@@ -277,19 +249,22 @@ def handle_client_proc(conn, addr):
                 top_p=0.15,
                 no_repeat_ngram_size=2
             )
-            transcription = ASR_TOKENIZER.decode(predicted_ids[0], skip_special_tokens=True)
+            transcription = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
             print(f"[{addr}] Транскрипция: {transcription}")
-            label = find_canonical_object(transcription, OBJ_MAPPING, OBJ_VARIANTS)
+            # 1. (самое приоритетное) Найти по mapping'у все нестандартные ТЦ/места (корона, мома, ...)
+            label = find_canonical_object(transcription, obj_mapping, obj_variants)
             if label:
                 print(f"[{addr}] Найден важный объект (канонизация): {label}")
                 return
-            label = find_special_object(transcription, OBJ_PATTERNS, NUM_WORDS, OBJ_CANONS)
+            # 2. Найти по canons — все больницы/поликлиники с номерами/без
+            label = find_special_object(transcription, obj_patterns, NUM_WORDS, obj_canons)
             if label:
                 print(f"[{addr}] Найден важный объект: {label}")
                 return
-            ents = extract_address_entities(transcription, NER_PIPE)
+            # 3. Классический адрес через NER
+            ents = extract_address_entities(transcription, ner_pipe)
             selected = extract_selected_attributes(ents, attributes=NER_ATTRS)
-            selected = correct_address(selected, STREETS_LOWER, STREETS_ORIGINAL)
+            selected = correct_address(selected, streets_lower, streets_original)
             out = []
             for attr in NER_ATTRS:
                 if attr in selected:
@@ -318,21 +293,19 @@ def handle_client_proc(conn, addr):
         conn.close()
         print(f"[{addr}] Завершение сессии")
 
-############### Main: preload, потом fork, потом только handle ##################
 def main():
     load_dotenv()
-    huggingface_token = os.environ["HF_TOKEN"]
-    model_preload(huggingface_token)
-    print(f"[SERVER] Слушаем на {HOST}:{PORT}")
+    huggingface_token = os.environ['HF_TOKEN']
+    print(f"Запуск сервера на {HOST}:{PORT}")
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
         server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_sock.bind((HOST, PORT))
         server_sock.listen(32)
         while True:
             conn, addr = server_sock.accept()
-            proc = mp.Process(target=handle_client_proc, args=(conn, addr), daemon=True)
+            proc = mp.Process(target=handle_client_proc, args=(conn, addr, huggingface_token), daemon=True)
             proc.start()
 
 if __name__ == '__main__':
-    mp.set_start_method('fork')  # Только на Linux для sharing моделей!
+    mp.set_start_method('spawn')
     main()
