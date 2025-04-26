@@ -9,6 +9,7 @@ from transformers import (
 from dotenv import load_dotenv
 import torch
 from rapidfuzz import fuzz, process
+import pymorphy2
 import re
 
 ##################### Параметры ########################
@@ -25,6 +26,9 @@ STREETS_FILE = "minsk_unique_streets2.txt"
 OBJECTS_FILE = "important_objects.txt"
 NUMERALS_FILE = "russian_numerals.txt"
 ########################################################
+
+# Инициализация MorphAnalyzer глобально (один раз на процесс)
+morph = pymorphy2.MorphAnalyzer()
 
 def load_streets_dict(filepath):
     original, lowered = [], []
@@ -90,19 +94,22 @@ def extract_selected_attributes(entities, attributes=None):
                     attr_map[label] = (prev_word + " / " + word, prev_score)
     return attr_map
 
-# === Блок для важных объектов и числительных с двумя паттернами ===
 def build_special_object_patterns(objects):
     objpat = '|'.join([re.escape(x) for x in sorted(objects, key=len, reverse=True)])
     numpat = r'(\d+|[а-яё\- ]+)'
-    # 1. "объект {номер или слово}"
     pattern1 = re.compile(
         rf'(?P<object>{objpat})\s*(?:№|номер|num|n\.?|n|N|N\.|#)?\s*(?P<num>{numpat})\b',
         re.IGNORECASE)
-    # 2. "{номер или слово} объект"
     pattern2 = re.compile(
         rf'(?P<num>{numpat})\s*(?P<object>{objpat})\b',
         re.IGNORECASE)
     return [pattern1, pattern2]
+
+def lemmatize_word(word):
+    cleaned = re.sub(r'[^а-яё-]', '', word.lower())
+    if not cleaned:
+        return word
+    return morph.parse(cleaned)[0].normal_form
 
 def wordnum_to_int(word, NUM_WORDS):
     word_clean = word.lower().replace("-", " ").replace("ё", "е").strip()
@@ -118,10 +125,28 @@ def wordnum_to_int(word, NUM_WORDS):
 
 def find_special_object(text, patterns, NUM_WORDS, important_objects_list=None):
     text_low = text.lower()
+    words = text_low.split()
+    lemmas = [lemmatize_word(w) for w in words]
+    # 1. Лемматизация: ищем любой важный объект вне зависимости от падежа
     if important_objects_list is not None:
         for obj in sorted(important_objects_list, key=len, reverse=True):
-            if re.search(rf'\b{re.escape(obj)}\b', text_low):
-                return obj
+            obj_lemma = lemmatize_word(obj)
+            for i, lemma in enumerate(lemmas):
+                if lemma == obj_lemma:
+                    # Ищем число/словесное числительное справа от найденного объекта (2 слова максимум)
+                    for j in range(1, 3):
+                        k = i + j
+                        if k < len(words):
+                            num_candidate = words[k]
+                            mnum = re.search(r"\d+", num_candidate)
+                            if mnum:
+                                return f"{obj} {mnum.group()}"
+                            num2 = wordnum_to_int(num_candidate, NUM_WORDS)
+                            if num2:
+                                return f"{obj} {num2}"
+                    # Если нет числа — вернуть только объект (например "автовокзал")
+                    return obj
+    # 2. Паттерны (как раньше)
     for pattern in patterns:
         for match in pattern.finditer(text):
             gd = match.groupdict()
@@ -187,7 +212,7 @@ def handle_client_proc(conn, addr, huggingface_token):
             )
             transcription = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
             print(f"[{addr}] Транскрипция: {transcription}")
-            # --- Новый блок: ищем важные объекты ---
+            # --- Новый блок: ищем важные объекты, теперь с лемматизацией!
             label = find_special_object(transcription, obj_patterns, NUM_WORDS, important_objects)
             if label:
                 print(f"[{addr}] Найден важный объект: {label}")
