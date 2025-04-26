@@ -1,3 +1,18 @@
+import inspect
+# --- Shim для Python 3.11+/3.12+, чтобы pymorphy2 работал с getargspec ---
+if not hasattr(inspect, 'getargspec'):
+    def getargspec(func):
+        from collections import namedtuple
+        FullArgSpec = inspect.getfullargspec(func)
+        ArgSpec = namedtuple('ArgSpec', 'args varargs keywords defaults')
+        return ArgSpec(
+            args=FullArgSpec.args,
+            varargs=FullArgSpec.varargs,
+            keywords=FullArgSpec.varkw,
+            defaults=FullArgSpec.defaults
+        )
+    inspect.getargspec = getargspec
+
 import socket
 import multiprocessing as mp
 import numpy as np
@@ -123,30 +138,50 @@ def wordnum_to_int(word, NUM_WORDS):
         return total
     return None
 
+def extract_number(word, NUM_WORDS):
+    """
+    Преобразует '25', '25-й', '25я', '25е', '25ая', '25-ая', 'двадцать пятая' и т.д. в число
+    """
+    w = word.lower()
+    mnum = re.match(r"(\d+)", w)
+    if mnum:
+        return int(mnum.group(1))
+    # Простые суффиксы 25-й, 25-я, 25-ая, и т.п.
+    w = re.sub(r'[-–—]?(й|я|е|ая|ое|ый|ий|ую|ой|ем|ым|ом|их|ыми|ого|ий|ие|ье|ая)?$', '', w)
+    if w.isdigit():
+        return int(w)
+    # Для словесных порядковых и количественных
+    n = wordnum_to_int(w, NUM_WORDS)
+    return n
+
 def find_special_object(text, patterns, NUM_WORDS, important_objects_list=None):
     text_low = text.lower()
     words = text_low.split()
     lemmas = [lemmatize_word(w) for w in words]
-    # 1. Лемматизация: ищем любой важный объект вне зависимости от падежа
+    # a) Пары: num+obj или obj+num (любой порядок!) с лемматизацией
     if important_objects_list is not None:
-        for obj in sorted(important_objects_list, key=len, reverse=True):
-            obj_lemma = lemmatize_word(obj)
-            for i, lemma in enumerate(lemmas):
-                if lemma == obj_lemma:
-                    # Ищем число/словесное числительное справа от найденного объекта (2 слова максимум)
-                    for j in range(1, 3):
-                        k = i + j
-                        if k < len(words):
-                            num_candidate = words[k]
-                            mnum = re.search(r"\d+", num_candidate)
-                            if mnum:
-                                return f"{obj} {mnum.group()}"
-                            num2 = wordnum_to_int(num_candidate, NUM_WORDS)
-                            if num2:
-                                return f"{obj} {num2}"
-                    # Если нет числа — вернуть только объект (например "автовокзал")
+        # num + obj
+        for i in range(len(words) - 1):
+            obj_candidate = lemmas[i+1]
+            num_candidate = extract_number(words[i], NUM_WORDS)
+            for obj in important_objects_list:
+                obj_lemma = lemmatize_word(obj)
+                if obj_candidate == obj_lemma and num_candidate:
+                    return f"{obj} {num_candidate}"
+        # obj + num
+        for i in range(len(words) - 1):
+            obj_candidate = lemmas[i]
+            num_candidate = extract_number(words[i+1], NUM_WORDS)
+            for obj in important_objects_list:
+                obj_lemma = lemmatize_word(obj)
+                if obj_candidate == obj_lemma and num_candidate:
+                    return f"{obj} {num_candidate}"
+        # Просто объект (автовокзал, больница и пр.)
+        for i, lemma in enumerate(lemmas):
+            for obj in important_objects_list:
+                if lemma == lemmatize_word(obj):
                     return obj
-    # 2. Паттерны (как раньше)
+    # b) Паттерны (как раньше)
     for pattern in patterns:
         for match in pattern.finditer(text):
             gd = match.groupdict()
@@ -154,13 +189,7 @@ def find_special_object(text, patterns, NUM_WORDS, important_objects_list=None):
             num_raw = gd.get('num')
             if obj_type and num_raw:
                 obj_type = obj_type.lower()
-                num = None
-                num_raw = num_raw.strip().replace("-", " ")
-                mnum = re.search(r"\d+", num_raw)
-                if mnum:
-                    num = int(mnum.group())
-                else:
-                    num = wordnum_to_int(num_raw, NUM_WORDS)
+                num = extract_number(num_raw, NUM_WORDS)
                 if num:
                     label = f"{obj_type} {num}"
                     return label
@@ -173,7 +202,6 @@ def handle_client_proc(conn, addr, huggingface_token):
     try:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-        # Speech-to-text model
         model = AutoModelForSpeechSeq2Seq.from_pretrained(
             MODEL_NAME,
             torch_dtype=torch_dtype,
@@ -183,15 +211,12 @@ def handle_client_proc(conn, addr, huggingface_token):
         tokenizer = WhisperTokenizer.from_pretrained(
             MODEL_NAME, language=LANGUAGE, task="transcribe", use_auth_token=huggingface_token
         )
-        # Address NER model
         print(f"[{addr}] Загружаем Address-NER модель...")
         ner_tokenizer = AutoTokenizer.from_pretrained(NER_MODEL, token=huggingface_token)
         ner_model = AutoModelForTokenClassification.from_pretrained(NER_MODEL, token=huggingface_token)
         ner_pipe = pipeline("ner", model=ner_model, tokenizer=ner_tokenizer, aggregation_strategy="simple")
         print(f"[{addr}] Address-NER загружена.")
-        # Грузим словарь улиц
         streets_original, streets_lower = load_streets_dict(STREETS_FILE)
-        # Грузим важные объекты и числительные
         important_objects = load_list(OBJECTS_FILE)
         NUM_WORDS = load_dict(NUMERALS_FILE)
         obj_patterns = build_special_object_patterns(important_objects)
@@ -212,12 +237,11 @@ def handle_client_proc(conn, addr, huggingface_token):
             )
             transcription = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
             print(f"[{addr}] Транскрипция: {transcription}")
-            # --- Новый блок: ищем важные объекты, теперь с лемматизацией!
+            # --- Ищем важные объекты, любые падежи, любой порядок! ---
             label = find_special_object(transcription, obj_patterns, NUM_WORDS, important_objects)
             if label:
                 print(f"[{addr}] Найден важный объект: {label}")
                 return
-            # ----------- Стандартная адресная логика --------
             ents = extract_address_entities(transcription, ner_pipe)
             selected = extract_selected_attributes(ents, attributes=NER_ATTRS)
             selected = correct_address(selected, streets_lower, streets_original)
@@ -229,8 +253,6 @@ def handle_client_proc(conn, addr, huggingface_token):
             addr_str = '-'.join(out)
             if addr_str:
                 print(f"[{addr}] Адрес найден: {addr_str}")
-            else:
-                print(f"[{addr}] Адрес не найден в этом фрагменте.")
         audio_buffer = bytearray()
         with conn:
             while True:
