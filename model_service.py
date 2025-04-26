@@ -6,6 +6,20 @@ from transformers import (
 import torch
 import numpy as np
 import os
+import inspect
+# --- Shim для Python 3.11+/3.12+, чтобы pymorphy2 работал с getargspec ---
+if not hasattr(inspect, 'getargspec'):
+    def getargspec(func):
+        from collections import namedtuple
+        FullArgSpec = inspect.getfullargspec(func)
+        ArgSpec = namedtuple('ArgSpec', 'args varargs keywords defaults')
+        return ArgSpec(
+            args=FullArgSpec.args,
+            varargs=FullArgSpec.varargs,
+            keywords=FullArgSpec.varkw,
+            defaults=FullArgSpec.defaults
+        )
+    inspect.getargspec = getargspec
 import pymorphy2
 import re
 
