@@ -90,15 +90,19 @@ def extract_selected_attributes(entities, attributes=None):
                     attr_map[label] = (prev_word + " / " + word, prev_score)
     return attr_map
 
-# === Блок для важных объектов и числительных ===
-def build_special_object_pattern(objects):
+# === Блок для важных объектов и числительных с двумя паттернами ===
+def build_special_object_patterns(objects):
     objpat = '|'.join([re.escape(x) for x in sorted(objects, key=len, reverse=True)])
     numpat = r'(\d+|[а-яё\- ]+)'
-    pats = [
+    # 1. "объект {номер или слово}"
+    pattern1 = re.compile(
         rf'(?P<object>{objpat})\s*(?:№|номер|num|n\.?|n|N|N\.|#)?\s*(?P<num>{numpat})\b',
+        re.IGNORECASE)
+    # 2. "{номер или слово} объект"
+    pattern2 = re.compile(
         rf'(?P<num>{numpat})\s*(?P<object>{objpat})\b',
-    ]
-    return re.compile('|'.join(pats), re.IGNORECASE)
+        re.IGNORECASE)
+    return [pattern1, pattern2]
 
 def wordnum_to_int(word, NUM_WORDS):
     word_clean = word.lower().replace("-", " ").replace("ё", "е").strip()
@@ -112,25 +116,31 @@ def wordnum_to_int(word, NUM_WORDS):
         return total
     return None
 
-def find_special_object(text, obj_pattern, NUM_WORDS):
-    for match in obj_pattern.finditer(text):
-        gd = match.groupdict()
-        obj_type = gd.get('object')
-        num_raw = gd.get('num')
-        if obj_type and num_raw:
-            obj_type = obj_type.lower()
-            num = None
-            num_raw = num_raw.strip().replace("-", " ")
-            mnum = re.search(r"\d+", num_raw)
-            if mnum:
-                num = int(mnum.group())
-            else:
-                num = wordnum_to_int(num_raw, NUM_WORDS)
-            if num:
-                label = f"{obj_type} {num}"
-                return label
-            else:
-                return f"{obj_type} {num_raw}"
+def find_special_object(text, patterns, NUM_WORDS, important_objects_list=None):
+    text_low = text.lower()
+    if important_objects_list is not None:
+        for obj in sorted(important_objects_list, key=len, reverse=True):
+            if re.search(rf'\b{re.escape(obj)}\b', text_low):
+                return obj
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            gd = match.groupdict()
+            obj_type = gd.get('object')
+            num_raw = gd.get('num')
+            if obj_type and num_raw:
+                obj_type = obj_type.lower()
+                num = None
+                num_raw = num_raw.strip().replace("-", " ")
+                mnum = re.search(r"\d+", num_raw)
+                if mnum:
+                    num = int(mnum.group())
+                else:
+                    num = wordnum_to_int(num_raw, NUM_WORDS)
+                if num:
+                    label = f"{obj_type} {num}"
+                    return label
+                else:
+                    return f"{obj_type} {num_raw}"
     return None
 
 def handle_client_proc(conn, addr, huggingface_token):
@@ -159,7 +169,7 @@ def handle_client_proc(conn, addr, huggingface_token):
         # Грузим важные объекты и числительные
         important_objects = load_list(OBJECTS_FILE)
         NUM_WORDS = load_dict(NUMERALS_FILE)
-        obj_pattern = build_special_object_pattern(important_objects)
+        obj_patterns = build_special_object_patterns(important_objects)
         def transcribe_audio(audio_data):
             if np.max(np.abs(audio_data)) != 0:
                 audio_data = (audio_data / np.max(np.abs(audio_data))).astype(np.float32)
@@ -178,7 +188,7 @@ def handle_client_proc(conn, addr, huggingface_token):
             transcription = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
             print(f"[{addr}] Транскрипция: {transcription}")
             # --- Новый блок: ищем важные объекты ---
-            label = find_special_object(transcription, obj_pattern, NUM_WORDS)
+            label = find_special_object(transcription, obj_patterns, NUM_WORDS, important_objects)
             if label:
                 print(f"[{addr}] Найден важный объект: {label}")
                 return
