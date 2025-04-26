@@ -228,7 +228,7 @@ OBJ_PATTERNS = None
 def model_preload(huggingface_token=None):
     # Прочитать токен из env если не передали явно
     if huggingface_token is None or huggingface_token == "":
-        huggingface_token = os.environ.get("HF_TOKEN")
+        huggingface_token = os.environ["HF_TOKEN"]
     assert huggingface_token, """HuggingFace TOKEN not found! 
     1. Сохраните токен в .env как HF_TOKEN=hf_xxxx 
     2. или передайте явно.
