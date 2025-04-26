@@ -1,5 +1,5 @@
 import inspect
-# --- Shim для Python 3.11+/3.12+, чтобы pymorphy2 работал с getargspec ---
+# Shim для Python 3.11+/3.12+ для pymorphy2
 if not hasattr(inspect, 'getargspec'):
     def getargspec(func):
         from collections import namedtuple
@@ -210,7 +210,7 @@ def find_special_object(text, patterns, NUM_WORDS, canons_set=None):
                     return f"{obj_type} {num_raw}"
     return None
 
-# ================== Глобальные переменные-модели ==================
+# ============ Глобальные переменные-модели ===============
 ASR_MODEL = None
 ASR_PROCESSOR = None
 ASR_TOKENIZER = None
@@ -225,20 +225,13 @@ OBJ_CANONS = None
 NUM_WORDS = None
 OBJ_PATTERNS = None
 
-def model_preload(huggingface_token=None):
-    # Прочитать токен из env если не передали явно
-    if huggingface_token is None or huggingface_token == "":
-        huggingface_token = os.environ["HF_TOKEN"]
-    assert huggingface_token, """HuggingFace TOKEN not found! 
-    1. Сохраните токен в .env как HF_TOKEN=hf_xxxx 
-    2. или передайте явно.
-    """
-
+def model_preload(huggingface_token):
     global ASR_MODEL, ASR_PROCESSOR, ASR_TOKENIZER
     global NER_MODEL, NER_TOKENIZER, NER_PIPE
     global STREETS_ORIGINAL, STREETS_LOWER, OBJ_MAPPING, OBJ_VARIANTS, OBJ_CANONS
     global NUM_WORDS, OBJ_PATTERNS
 
+    assert huggingface_token, "HuggingFace TOKEN not found! Добавь HF_TOKEN в окружение."
     print("[SERVER] Loading all models to memory (preload)...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
@@ -253,7 +246,7 @@ def model_preload(huggingface_token=None):
     )
     NER_TOKENIZER = AutoTokenizer.from_pretrained(NER_MODEL, use_auth_token=huggingface_token)
     NER_MODEL = AutoModelForTokenClassification.from_pretrained(NER_MODEL, use_auth_token=huggingface_token)
-    pipeline_device = 0 if torch.cuda.is_available() else -1  # Main fix: явно указываем device для pipeline!
+    pipeline_device = 0 if torch.cuda.is_available() else -1
     NER_PIPE = pipeline(
         "ner",
         model=NER_MODEL,
@@ -290,12 +283,10 @@ def handle_client_proc(conn, addr):
             )
             transcription = ASR_TOKENIZER.decode(predicted_ids[0], skip_special_tokens=True)
             print(f"[{addr}] Транскрипция: {transcription}")
-            # 1. Канонические объекты (замок, корона, момо и т.д.)
             label = find_canonical_object(transcription, OBJ_MAPPING, OBJ_VARIANTS)
             if label:
                 print(f"[{addr}] Найден важный объект (канонизация): {label}")
                 return
-            # 2. Медобъекты с номерами
             label = find_special_object(transcription, OBJ_PATTERNS, NUM_WORDS, OBJ_CANONS)
             if label:
                 print(f"[{addr}] Найден важный объект: {label}")
@@ -311,8 +302,6 @@ def handle_client_proc(conn, addr):
             addr_str = '-'.join(out)
             if addr_str:
                 print(f"[{addr}] Адрес найден: {addr_str}")
-            else:
-                print(f"[{addr}] Адрес не найден в этом фрагменте.")
         audio_buffer = bytearray()
         with conn:
             while True:
@@ -333,9 +322,9 @@ def handle_client_proc(conn, addr):
 
 def main():
     load_dotenv()
-    huggingface_token = os.environ.get('HF_TOKEN')
+    huggingface_token = os.environ["HF_TOKEN"]
     model_preload(huggingface_token)
-    print(f"[SERVER] Запуск сокета на {HOST}:{PORT}")
+    print(f"[SERVER] Запуск сервера на {HOST}:{PORT}")
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
         server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_sock.bind((HOST, PORT))
