@@ -1,7 +1,6 @@
 import socket
 import multiprocessing as mp
 import numpy as np
-import os
 import requests
 from dotenv import load_dotenv
 
@@ -9,27 +8,8 @@ HOST = "0.0.0.0"
 PORT = 8082
 BUFFER_SIZE = 48000 * 2
 OVERLAP_SIZE = 48000 // 2
-SAMPLE_RATE = 16000
 
-# Настрой сервисов
-MODEL_SERVER_URL = "http://localhost:7000"
-
-def extract_ner_remotely(text):
-    resp = requests.post(f"{MODEL_SERVER_URL}/ner/", data={"text": text})
-    if resp.ok:
-        return resp.json()
-    else:
-        return {}
-
-def transcribe_remotely(audio_bytes):
-    resp = requests.post(
-        f"{MODEL_SERVER_URL}/asr/",
-        files={"audio": ("audio.raw", audio_bytes)}
-    )
-    if resp.ok:
-        return resp.json()["text"]
-    else:
-        return ""
+MODEL_SERVICE_URL = "http://localhost:7000/address/"
 
 def handle_client_proc(conn, addr):
     try:
@@ -42,20 +22,18 @@ def handle_client_proc(conn, addr):
                 audio_buffer.extend(data)
                 while len(audio_buffer) >= BUFFER_SIZE:
                     block = audio_buffer[:BUFFER_SIZE]
-                    audio_data = np.frombuffer(block, np.int16)
-                    
-                    # 1. Транскрибация через REST API
-                    audio_bytes = audio_data.tobytes()
-                    transcription = transcribe_remotely(audio_bytes)
-                    print(f"[{addr}] Транскрипция:", transcription)
-
-                    # 2. NER через REST API
-                    ner_res = extract_ner_remotely(transcription)
-                    print(f"[{addr}] NER:", ner_res)
-
-                    # 3. Дальше ваша канонизация, спец.логика, вывод, etc.
-                    # (сюда вставь postprocessing — см. свои фрагменты выше)
-
+                    # 1. Отправляем аудиоблок в модельный сервис (bin)
+                    result = None
+                    try:
+                        resp = requests.post(
+                            MODEL_SERVICE_URL,
+                            files={"audio": ("audio.raw", block)}
+                        )
+                        if resp.ok:
+                            result = resp.json()
+                    except Exception as e:
+                        print(f"[{addr}] ошибка подключения к сервису: {e}")
+                    print(f"[{addr}] Ответ сервиса: {result}")
                     audio_buffer = audio_buffer[BUFFER_SIZE - OVERLAP_SIZE:]
     except Exception as e:
         print(f"[{addr}] Ошибка: {e}")
