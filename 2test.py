@@ -30,19 +30,19 @@ import re
 ##################### Параметры ########################
 HOST = "0.0.0.0"
 PORT = 8082
-BUFFER_SIZE = 48000 * 2    # 2 сек для 16kHz 16bit mono
-OVERLAP_SIZE = 48000 // 2  # 0.5 сек перекрытия
+BUFFER_SIZE = 48000 * 2
+OVERLAP_SIZE = 48000 // 2
 SAMPLE_RATE = 16000
 MODEL_NAME = "openai/whisper-large-v3-turbo"
 LANGUAGE = "ru"
 NER_MODEL = "aidarmusin/address-ner-ru"
 NER_ATTRS = ["Street", "House", "Building"]
 STREETS_FILE = "minsk_unique_streets2.txt"
-OBJECTS_FILE = "important_objects.txt"
+OBJECTS_FILE = "important_objects.txt"         # для больниц, поликлиник и т.д.
+OBJECT_MAPPING_FILE = "important_objects_mapping.txt"  # новый файл для лейблов магазинов/моллов!
 NUMERALS_FILE = "russian_numerals.txt"
 ########################################################
 
-# Инициализация MorphAnalyzer глобально (один раз на процесс)
 morph = pymorphy2.MorphAnalyzer()
 
 def load_streets_dict(filepath):
@@ -67,6 +67,29 @@ def load_dict(filepath, sep=":"):
                 k, v = line.strip().split(sep, 1)
                 d[k.strip()] = int(v.strip())
     return d
+
+# --- Загрузка карты вариантов важных мест (например, замок/корона —> корона замок) ---
+def load_object_canon_mapping(filepath):
+    mapping = {}
+    variants = set()
+    with open(filepath, encoding="utf-8") as f:
+        for line in f:
+            if ':' not in line:
+                continue
+            var, canon = line.strip().split(':', 1)
+            v = var.strip().lower()
+            c = canon.strip()
+            mapping[v] = c
+            variants.add(v)
+    return mapping, variants
+
+# --- Быстрый поиск канонического важного объекта ---
+def find_canonical_object(text, mapping, variants):
+    text_low = text.lower()
+    for variant in sorted(variants, key=len, reverse=True):  # длиннее — приоритет
+        if re.search(rf'\b{re.escape(variant)}\b', text_low):
+            return mapping[variant]
+    return None
 
 def correct_street_name(name, streets_lower, streets_original, min_score=80):
     result = process.extractOne(name.lower(), streets_lower, scorer=fuzz.WRatio)
@@ -139,18 +162,13 @@ def wordnum_to_int(word, NUM_WORDS):
     return None
 
 def extract_number(word, NUM_WORDS):
-    """
-    Преобразует '25', '25-й', '25я', '25е', '25ая', '25-ая', 'двадцать пятая' и т.д. в число
-    """
     w = word.lower()
     mnum = re.match(r"(\d+)", w)
     if mnum:
         return int(mnum.group(1))
-    # Простые суффиксы 25-й, 25-я, 25-ая, и т.п.
     w = re.sub(r'[-–—]?(й|я|е|ая|ое|ый|ий|ую|ой|ем|ым|ом|их|ыми|ого|ий|ие|ье|ая)?$', '', w)
     if w.isdigit():
         return int(w)
-    # Для словесных порядковых и количественных
     n = wordnum_to_int(w, NUM_WORDS)
     return n
 
@@ -158,9 +176,7 @@ def find_special_object(text, patterns, NUM_WORDS, important_objects_list=None):
     text_low = text.lower()
     words = text_low.split()
     lemmas = [lemmatize_word(w) for w in words]
-    # a) Пары: num+obj или obj+num (любой порядок!) с лемматизацией
     if important_objects_list is not None:
-        # num + obj
         for i in range(len(words) - 1):
             obj_candidate = lemmas[i+1]
             num_candidate = extract_number(words[i], NUM_WORDS)
@@ -168,7 +184,6 @@ def find_special_object(text, patterns, NUM_WORDS, important_objects_list=None):
                 obj_lemma = lemmatize_word(obj)
                 if obj_candidate == obj_lemma and num_candidate:
                     return f"{obj} {num_candidate}"
-        # obj + num
         for i in range(len(words) - 1):
             obj_candidate = lemmas[i]
             num_candidate = extract_number(words[i+1], NUM_WORDS)
@@ -176,12 +191,10 @@ def find_special_object(text, patterns, NUM_WORDS, important_objects_list=None):
                 obj_lemma = lemmatize_word(obj)
                 if obj_candidate == obj_lemma and num_candidate:
                     return f"{obj} {num_candidate}"
-        # Просто объект (автовокзал, больница и пр.)
         for i, lemma in enumerate(lemmas):
             for obj in important_objects_list:
                 if lemma == lemmatize_word(obj):
                     return obj
-    # b) Паттерны (как раньше)
     for pattern in patterns:
         for match in pattern.finditer(text):
             gd = match.groupdict()
@@ -220,6 +233,8 @@ def handle_client_proc(conn, addr, huggingface_token):
         important_objects = load_list(OBJECTS_FILE)
         NUM_WORDS = load_dict(NUMERALS_FILE)
         obj_patterns = build_special_object_patterns(important_objects)
+        # --- Загрузка маппинга вариантов важных объектов! ---
+        obj_mapping, obj_variants = load_object_canon_mapping(OBJECT_MAPPING_FILE)
         def transcribe_audio(audio_data):
             if np.max(np.abs(audio_data)) != 0:
                 audio_data = (audio_data / np.max(np.abs(audio_data))).astype(np.float32)
@@ -237,7 +252,12 @@ def handle_client_proc(conn, addr, huggingface_token):
             )
             transcription = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
             print(f"[{addr}] Транскрипция: {transcription}")
-            # --- Ищем важные объекты, любые падежи, любой порядок! ---
+            # --- Сначала ищем канонические важные места, например Момо, Корона, Замок и пр. ---
+            label = find_canonical_object(transcription, obj_mapping, obj_variants)
+            if label:
+                print(f"[{addr}] Найден важный объект (канонизация): {label}")
+                return
+            # --- Далее классические медучреждения и т.п. ---
             label = find_special_object(transcription, obj_patterns, NUM_WORDS, important_objects)
             if label:
                 print(f"[{addr}] Найден важный объект: {label}")
