@@ -1,11 +1,4 @@
-from natasha import AddrExtractor
-from pymorphy2 import MorphAnalyzer
-
-morph = MorphAnalyzer()
-extractor = AddrExtractor(morph)
-
-texts = [
-    'Москва, проспект Мира, дом 51',import socket
+import socket
 import multiprocessing as mp
 import numpy as np
 import os
@@ -18,11 +11,11 @@ import torch
 from rapidfuzz import fuzz, process
 import re
 
-################# Параметры ##################
+##################### Параметры ########################
 HOST = "0.0.0.0"
-PORT = 8084
-BUFFER_SIZE = 32000 * 2    # 2 сек для 16kHz 16bit mono
-OVERLAP_SIZE = 32000 // 2  # 0.5 сек перекрытия
+PORT = 8082
+BUFFER_SIZE = 48000 * 2    # 2 сек для 16kHz 16bit mono
+OVERLAP_SIZE = 48000 // 2  # 0.5 сек перекрытия
 SAMPLE_RATE = 16000
 MODEL_NAME = "openai/whisper-large-v3-turbo"
 LANGUAGE = "ru"
@@ -31,7 +24,17 @@ NER_ATTRS = ["Street", "House", "Building"]
 STREETS_FILE = "minsk_unique_streets2.txt"
 OBJECTS_FILE = "important_objects.txt"
 NUMERALS_FILE = "russian_numerals.txt"
-################################################
+########################################################
+
+def load_streets_dict(filepath):
+    original, lowered = [], []
+    with open(filepath, encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if s:
+                original.append(s)
+                lowered.append(s.lower())
+    return original, lowered
 
 def load_list(filepath):
     with open(filepath, encoding="utf-8") as f:
@@ -87,15 +90,13 @@ def extract_selected_attributes(entities, attributes=None):
                     attr_map[label] = (prev_word + " / " + word, prev_score)
     return attr_map
 
+# === Блок для важных объектов и числительных ===
 def build_special_object_pattern(objects):
-    # Построим паттерн для всех объектов (без номеров)
     objpat = '|'.join([re.escape(x) for x in sorted(objects, key=len, reverse=True)])
-    # Позволяем: "объект №10", "объект 8", "шестая объект", "объект тридцать первый"
     numpat = r'(\d+|[а-яё\- ]+)'
-    # Примеры: поликлиника 10, поликлиника №10, поликлиника номер 10, десятая поликлиника
     pats = [
         rf'(?P<object>{objpat})\s*(?:№|номер|num|n\.?|n|N|N\.|#)?\s*(?P<num>{numpat})\b',
-        rf'(?P<num>{numpat})\s*(?P<object>{objpat})\b',    # "пятая больница"
+        rf'(?P<num>{numpat})\s*(?P<object>{objpat})\b',
     ]
     return re.compile('|'.join(pats), re.IGNORECASE)
 
@@ -103,7 +104,6 @@ def wordnum_to_int(word, NUM_WORDS):
     word_clean = word.lower().replace("-", " ").replace("ё", "е").strip()
     if word_clean in NUM_WORDS:
         return NUM_WORDS[word_clean]
-    # Несколько слов: "тридцать два"
     total = 0
     for w in word_clean.split():
         if w in NUM_WORDS:
@@ -113,19 +113,14 @@ def wordnum_to_int(word, NUM_WORDS):
     return None
 
 def find_special_object(text, obj_pattern, NUM_WORDS):
-    """
-    Находит и нормализует объекты типа "поликлиника 10", "пятая больница", "аэропорт 2"
-    Возвращает label или None
-    """
     for match in obj_pattern.finditer(text):
         gd = match.groupdict()
         obj_type = gd.get('object')
         num_raw = gd.get('num')
-        if obj_type:
+        if obj_type and num_raw:
             obj_type = obj_type.lower()
             num = None
             num_raw = num_raw.strip().replace("-", " ")
-            # Сначала числом
             mnum = re.search(r"\d+", num_raw)
             if mnum:
                 num = int(mnum.group())
@@ -143,6 +138,7 @@ def handle_client_proc(conn, addr, huggingface_token):
     try:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        # Speech-to-text model
         model = AutoModelForSpeechSeq2Seq.from_pretrained(
             MODEL_NAME,
             torch_dtype=torch_dtype,
@@ -152,22 +148,18 @@ def handle_client_proc(conn, addr, huggingface_token):
         tokenizer = WhisperTokenizer.from_pretrained(
             MODEL_NAME, language=LANGUAGE, task="transcribe", use_auth_token=huggingface_token
         )
-
+        # Address NER model
         print(f"[{addr}] Загружаем Address-NER модель...")
         ner_tokenizer = AutoTokenizer.from_pretrained(NER_MODEL, token=huggingface_token)
         ner_model = AutoModelForTokenClassification.from_pretrained(NER_MODEL, token=huggingface_token)
         ner_pipe = pipeline("ner", model=ner_model, tokenizer=ner_tokenizer, aggregation_strategy="simple")
         print(f"[{addr}] Address-NER загружена.")
-
-        # Грузим словари
-        streets_original = load_list(STREETS_FILE)
-        streets_lower = [s.lower() for s in streets_original]
-
+        # Грузим словарь улиц
+        streets_original, streets_lower = load_streets_dict(STREETS_FILE)
+        # Грузим важные объекты и числительные
         important_objects = load_list(OBJECTS_FILE)
         NUM_WORDS = load_dict(NUMERALS_FILE)
-
         obj_pattern = build_special_object_pattern(important_objects)
-
         def transcribe_audio(audio_data):
             if np.max(np.abs(audio_data)) != 0:
                 audio_data = (audio_data / np.max(np.abs(audio_data))).astype(np.float32)
@@ -185,14 +177,12 @@ def handle_client_proc(conn, addr, huggingface_token):
             )
             transcription = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
             print(f"[{addr}] Транскрипция: {transcription}")
-
-            # СНАЧАЛА ищем спецобъекты (больницы, поликлиники и т.п.)
+            # --- Новый блок: ищем важные объекты ---
             label = find_special_object(transcription, obj_pattern, NUM_WORDS)
             if label:
-                print(f"[{addr}] Спецобъект найден: {label}")
+                print(f"[{addr}] Найден важный объект: {label}")
                 return
-
-            # Стандартная адресная логика
+            # ----------- Стандартная адресная логика --------
             ents = extract_address_entities(transcription, ner_pipe)
             selected = extract_selected_attributes(ents, attributes=NER_ATTRS)
             selected = correct_address(selected, streets_lower, streets_original)
@@ -206,7 +196,6 @@ def handle_client_proc(conn, addr, huggingface_token):
                 print(f"[{addr}] Адрес найден: {addr_str}")
             else:
                 print(f"[{addr}] Адрес не найден в этом фрагменте.")
-
         audio_buffer = bytearray()
         with conn:
             while True:
@@ -241,17 +230,3 @@ def main():
 if __name__ == '__main__':
     mp.set_start_method('spawn')
     main()
-    'г. Самара, Пр-т Ленина, дом 7',
-    'Санкт-Петербург, пр. Каменноостровский, 44',
-    'г. Тула, пер. Красноармейский, дом 11',
-    'Новосибирск, пл. Калинина, дом 1',
-    'г. Москва, бульвар Дмитрия Донского, д. 13',
-    'шоссе Энтузиастов, д. 65',
-    'г. Томск, ул. Ленина, д. 22'
-]
-for t in texts:
-    matches = extractor(t)
-    for m in matches:
-        print(t)
-        print('  fact:', m.fact)
-        print('  строка в тексте:', t[m.start:m.stop])
