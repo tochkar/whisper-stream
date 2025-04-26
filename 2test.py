@@ -298,6 +298,8 @@ def main():
         obj_mapping, obj_variants, obj_canons = load_object_canon_mapping(OBJECT_MAPPING_FILE)
         NUM_WORDS = load_dict(NUMERALS_FILE)
         obj_patterns = build_special_object_patterns(obj_canons)
+    except Exception as e:
+        print(f"[{addr}] Ошибка: {e}")
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
         server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_sock.bind((HOST, PORT))
