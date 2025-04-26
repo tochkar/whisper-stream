@@ -38,12 +38,13 @@ LANGUAGE = "ru"
 NER_MODEL = "aidarmusin/address-ner-ru"
 NER_ATTRS = ["Street", "House", "Building"]
 STREETS_FILE = "minsk_unique_streets2.txt"
-OBJECTS_FILE = "important_objects.txt"         # для больниц, поликлиник и т.д.
-OBJECT_MAPPING_FILE = "important_objects_mapping.txt"  # новый файл для лейблов магазинов/моллов!
+OBJECT_MAPPING_FILE = "important_objects_mapping.txt"
 NUMERALS_FILE = "russian_numerals.txt"
 ########################################################
 
 morph = pymorphy2.MorphAnalyzer()
+
+# ================= Вспомогательные функции =================
 
 def load_streets_dict(filepath):
     original, lowered = [], []
@@ -55,10 +56,6 @@ def load_streets_dict(filepath):
                 lowered.append(s.lower())
     return original, lowered
 
-def load_list(filepath):
-    with open(filepath, encoding="utf-8") as f:
-        return [line.strip() for line in f if line.strip()]
-
 def load_dict(filepath, sep=":"):
     d = {}
     with open(filepath, encoding="utf-8") as f:
@@ -68,10 +65,10 @@ def load_dict(filepath, sep=":"):
                 d[k.strip()] = int(v.strip())
     return d
 
-# --- Загрузка карты вариантов важных мест (например, замок/корона —> корона замок) ---
 def load_object_canon_mapping(filepath):
     mapping = {}
     variants = set()
+    canons = set()
     with open(filepath, encoding="utf-8") as f:
         for line in f:
             if ':' not in line:
@@ -81,12 +78,12 @@ def load_object_canon_mapping(filepath):
             c = canon.strip()
             mapping[v] = c
             variants.add(v)
-    return mapping, variants
+            canons.add(c)
+    return mapping, variants, canons
 
-# --- Быстрый поиск канонического важного объекта ---
 def find_canonical_object(text, mapping, variants):
     text_low = text.lower()
-    for variant in sorted(variants, key=len, reverse=True):  # длиннее — приоритет
+    for variant in sorted(variants, key=len, reverse=True):
         if re.search(rf'\b{re.escape(variant)}\b', text_low):
             return mapping[variant]
     return None
@@ -132,8 +129,8 @@ def extract_selected_attributes(entities, attributes=None):
                     attr_map[label] = (prev_word + " / " + word, prev_score)
     return attr_map
 
-def build_special_object_patterns(objects):
-    objpat = '|'.join([re.escape(x) for x in sorted(objects, key=len, reverse=True)])
+def build_special_object_patterns(canons):
+    objpat = '|'.join([re.escape(x) for x in sorted(canons, key=len, reverse=True)])
     numpat = r'(\d+|[а-яё\- ]+)'
     pattern1 = re.compile(
         rf'(?P<object>{objpat})\s*(?:№|номер|num|n\.?|n|N|N\.|#)?\s*(?P<num>{numpat})\b',
@@ -172,27 +169,30 @@ def extract_number(word, NUM_WORDS):
     n = wordnum_to_int(w, NUM_WORDS)
     return n
 
-def find_special_object(text, patterns, NUM_WORDS, important_objects_list=None):
+def find_special_object(text, patterns, NUM_WORDS, canons_set=None):
     text_low = text.lower()
     words = text_low.split()
     lemmas = [lemmatize_word(w) for w in words]
-    if important_objects_list is not None:
+    if canons_set is not None:
+        # num + obj
         for i in range(len(words) - 1):
             obj_candidate = lemmas[i+1]
             num_candidate = extract_number(words[i], NUM_WORDS)
-            for obj in important_objects_list:
+            for obj in canons_set:
                 obj_lemma = lemmatize_word(obj)
                 if obj_candidate == obj_lemma and num_candidate:
                     return f"{obj} {num_candidate}"
+        # obj + num
         for i in range(len(words) - 1):
             obj_candidate = lemmas[i]
             num_candidate = extract_number(words[i+1], NUM_WORDS)
-            for obj in important_objects_list:
+            for obj in canons_set:
                 obj_lemma = lemmatize_word(obj)
                 if obj_candidate == obj_lemma and num_candidate:
                     return f"{obj} {num_candidate}"
+        # Просто объект
         for i, lemma in enumerate(lemmas):
-            for obj in important_objects_list:
+            for obj in canons_set:
                 if lemma == lemmatize_word(obj):
                     return obj
     for pattern in patterns:
@@ -210,38 +210,61 @@ def find_special_object(text, patterns, NUM_WORDS, important_objects_list=None):
                     return f"{obj_type} {num_raw}"
     return None
 
-def handle_client_proc(conn, addr, huggingface_token):
+# ================== Глобальные переменные-модели ==================
+ASR_MODEL = None
+ASR_PROCESSOR = None
+ASR_TOKENIZER = None
+NER_MODEL = None
+NER_TOKENIZER = None
+NER_PIPE = None
+STREETS_ORIGINAL = None
+STREETS_LOWER = None
+OBJ_MAPPING = None
+OBJ_VARIANTS = None
+OBJ_CANONS = None
+NUM_WORDS = None
+OBJ_PATTERNS = None
+
+def model_preload(huggingface_token):
+    global ASR_MODEL, ASR_PROCESSOR, ASR_TOKENIZER
+    global NER_MODEL, NER_TOKENIZER, NER_PIPE
+    global STREETS_ORIGINAL, STREETS_LOWER, OBJ_MAPPING, OBJ_VARIANTS, OBJ_CANONS
+    global NUM_WORDS, OBJ_PATTERNS
+
+    print("[SERVER] Loading all models to memory (preload)...")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    ASR_MODEL = AutoModelForSpeechSeq2Seq.from_pretrained(
+        MODEL_NAME,
+        torch_dtype=torch_dtype,
+        use_auth_token=huggingface_token
+    ).to(device)
+    ASR_PROCESSOR = AutoProcessor.from_pretrained(MODEL_NAME, use_auth_token=huggingface_token)
+    ASR_TOKENIZER = WhisperTokenizer.from_pretrained(
+        MODEL_NAME, language=LANGUAGE, task="transcribe", use_auth_token=huggingface_token
+    )
+    NER_TOKENIZER = AutoTokenizer.from_pretrained(NER_MODEL, token=huggingface_token)
+    NER_MODEL = AutoModelForTokenClassification.from_pretrained(NER_MODEL, token=huggingface_token)
+    NER_PIPE = pipeline("ner", model=NER_MODEL, tokenizer=NER_TOKENIZER, aggregation_strategy="simple")
+    STREETS_ORIGINAL, STREETS_LOWER = load_streets_dict(STREETS_FILE)
+    OBJ_MAPPING, OBJ_VARIANTS, OBJ_CANONS = load_object_canon_mapping(OBJECT_MAPPING_FILE)
+    NUM_WORDS = load_dict(NUMERALS_FILE)
+    OBJ_PATTERNS = build_special_object_patterns(OBJ_CANONS)
+    print("[SERVER] Models/preprocessors loaded successfully.")
+
+def handle_client_proc(conn, addr):
     print(f"[{addr}] Новый процесс обработчика клиента")
     try:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-        model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            MODEL_NAME,
-            torch_dtype=torch_dtype,
-            use_auth_token=huggingface_token
-        ).to(device)
-        processor = AutoProcessor.from_pretrained(MODEL_NAME, use_auth_token=huggingface_token)
-        tokenizer = WhisperTokenizer.from_pretrained(
-            MODEL_NAME, language=LANGUAGE, task="transcribe", use_auth_token=huggingface_token
-        )
-        print(f"[{addr}] Загружаем Address-NER модель...")
-        ner_tokenizer = AutoTokenizer.from_pretrained(NER_MODEL, token=huggingface_token)
-        ner_model = AutoModelForTokenClassification.from_pretrained(NER_MODEL, token=huggingface_token)
-        ner_pipe = pipeline("ner", model=ner_model, tokenizer=ner_tokenizer, aggregation_strategy="simple")
-        print(f"[{addr}] Address-NER загружена.")
-        streets_original, streets_lower = load_streets_dict(STREETS_FILE)
-        important_objects = load_list(OBJECTS_FILE)
-        NUM_WORDS = load_dict(NUMERALS_FILE)
-        obj_patterns = build_special_object_patterns(important_objects)
-        # --- Загрузка маппинга вариантов важных объектов! ---
-        obj_mapping, obj_variants = load_object_canon_mapping(OBJECT_MAPPING_FILE)
+
         def transcribe_audio(audio_data):
             if np.max(np.abs(audio_data)) != 0:
                 audio_data = (audio_data / np.max(np.abs(audio_data))).astype(np.float32)
             else:
                 audio_data = audio_data.astype(np.float32)
-            input_features = processor(audio_data, sampling_rate=SAMPLE_RATE, return_tensors="pt").input_features.to(device).to(torch_dtype)
-            predicted_ids = model.generate(
+            input_features = ASR_PROCESSOR(audio_data, sampling_rate=SAMPLE_RATE, return_tensors="pt").input_features.to(device).to(torch_dtype)
+            predicted_ids = ASR_MODEL.generate(
                 input_features,
                 max_length=1024,
                 do_sample=True,
@@ -250,21 +273,21 @@ def handle_client_proc(conn, addr, huggingface_token):
                 top_p=0.15,
                 no_repeat_ngram_size=2
             )
-            transcription = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
+            transcription = ASR_TOKENIZER.decode(predicted_ids[0], skip_special_tokens=True)
             print(f"[{addr}] Транскрипция: {transcription}")
-            # --- Сначала ищем канонические важные места, например Момо, Корона, Замок и пр. ---
-            label = find_canonical_object(transcription, obj_mapping, obj_variants)
+            # 1. Канонические объекты (замок, корона, момо и т.д.)
+            label = find_canonical_object(transcription, OBJ_MAPPING, OBJ_VARIANTS)
             if label:
                 print(f"[{addr}] Найден важный объект (канонизация): {label}")
                 return
-            # --- Далее классические медучреждения и т.п. ---
-            label = find_special_object(transcription, obj_patterns, NUM_WORDS, important_objects)
+            # 2. Медобъекты с номерами
+            label = find_special_object(transcription, OBJ_PATTERNS, NUM_WORDS, OBJ_CANONS)
             if label:
                 print(f"[{addr}] Найден важный объект: {label}")
                 return
-            ents = extract_address_entities(transcription, ner_pipe)
+            ents = extract_address_entities(transcription, NER_PIPE)
             selected = extract_selected_attributes(ents, attributes=NER_ATTRS)
-            selected = correct_address(selected, streets_lower, streets_original)
+            selected = correct_address(selected, STREETS_LOWER, STREETS_ORIGINAL)
             out = []
             for attr in NER_ATTRS:
                 if attr in selected:
@@ -294,16 +317,17 @@ def handle_client_proc(conn, addr, huggingface_token):
 def main():
     load_dotenv()
     huggingface_token = os.environ['HF_TOKEN']
-    print(f"Запуск сервера на {HOST}:{PORT}")
+    model_preload(huggingface_token)
+    print(f"[SERVER] Запуск сокета на {HOST}:{PORT}")
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
         server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_sock.bind((HOST, PORT))
         server_sock.listen(32)
         while True:
             conn, addr = server_sock.accept()
-            proc = mp.Process(target=handle_client_proc, args=(conn, addr, huggingface_token), daemon=True)
+            proc = mp.Process(target=handle_client_proc, args=(conn, addr), daemon=True)
             proc.start()
 
 if __name__ == '__main__':
-    mp.set_start_method('spawn')
+    mp.set_start_method('fork')  # для Linux/RAM-shared моделей, иначе spawn (Windows/Mac)
     main()
