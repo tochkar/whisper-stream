@@ -225,7 +225,15 @@ OBJ_CANONS = None
 NUM_WORDS = None
 OBJ_PATTERNS = None
 
-def model_preload(huggingface_token):
+def model_preload(huggingface_token=None):
+    # Прочитать токен из env если не передали явно
+    if huggingface_token is None or huggingface_token == "":
+        huggingface_token = os.environ.get("HF_TOKEN")
+    assert huggingface_token, """HuggingFace TOKEN not found! 
+    1. Сохраните токен в .env как HF_TOKEN=hf_xxxx 
+    2. или передайте явно.
+    """
+
     global ASR_MODEL, ASR_PROCESSOR, ASR_TOKENIZER
     global NER_MODEL, NER_TOKENIZER, NER_PIPE
     global STREETS_ORIGINAL, STREETS_LOWER, OBJ_MAPPING, OBJ_VARIANTS, OBJ_CANONS
@@ -243,9 +251,16 @@ def model_preload(huggingface_token):
     ASR_TOKENIZER = WhisperTokenizer.from_pretrained(
         MODEL_NAME, language=LANGUAGE, task="transcribe", use_auth_token=huggingface_token
     )
-    NER_TOKENIZER = AutoTokenizer.from_pretrained(NER_MODEL, token=huggingface_token)
-    NER_MODEL = AutoModelForTokenClassification.from_pretrained(NER_MODEL, token=huggingface_token)
-    NER_PIPE = pipeline("ner", model=NER_MODEL, tokenizer=NER_TOKENIZER, aggregation_strategy="simple")
+    NER_TOKENIZER = AutoTokenizer.from_pretrained(NER_MODEL, use_auth_token=huggingface_token)
+    NER_MODEL = AutoModelForTokenClassification.from_pretrained(NER_MODEL, use_auth_token=huggingface_token)
+    pipeline_device = 0 if torch.cuda.is_available() else -1  # Main fix: явно указываем device для pipeline!
+    NER_PIPE = pipeline(
+        "ner",
+        model=NER_MODEL,
+        tokenizer=NER_TOKENIZER,
+        aggregation_strategy="simple",
+        device=pipeline_device
+    )
     STREETS_ORIGINAL, STREETS_LOWER = load_streets_dict(STREETS_FILE)
     OBJ_MAPPING, OBJ_VARIANTS, OBJ_CANONS = load_object_canon_mapping(OBJECT_MAPPING_FILE)
     NUM_WORDS = load_dict(NUMERALS_FILE)
@@ -296,6 +311,8 @@ def handle_client_proc(conn, addr):
             addr_str = '-'.join(out)
             if addr_str:
                 print(f"[{addr}] Адрес найден: {addr_str}")
+            else:
+                print(f"[{addr}] Адрес не найден в этом фрагменте.")
         audio_buffer = bytearray()
         with conn:
             while True:
@@ -316,7 +333,7 @@ def handle_client_proc(conn, addr):
 
 def main():
     load_dotenv()
-    huggingface_token = os.environ['HF_TOKEN']
+    huggingface_token = os.environ.get('HF_TOKEN')
     model_preload(huggingface_token)
     print(f"[SERVER] Запуск сокета на {HOST}:{PORT}")
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
@@ -329,5 +346,5 @@ def main():
             proc.start()
 
 if __name__ == '__main__':
-    mp.set_start_method('fork')  # для Linux/RAM-shared моделей, иначе spawn (Windows/Mac)
+    mp.set_start_method('fork')
     main()
