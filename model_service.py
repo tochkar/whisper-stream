@@ -7,6 +7,7 @@ import torch
 import numpy as np
 import os
 import inspect
+
 # --- Shim для Python 3.11+/3.12+, чтобы pymorphy2 работал с getargspec ---
 if not hasattr(inspect, 'getargspec'):
     def getargspec(func):
@@ -20,8 +21,10 @@ if not hasattr(inspect, 'getargspec'):
             defaults=FullArgSpec.defaults
         )
     inspect.getargspec = getargspec
+
 import pymorphy2
 import re
+from rapidfuzz import process, fuzz
 
 # --- Параметры ---
 MODEL_NAME = "openai/whisper-large-v3-turbo"
@@ -88,12 +91,25 @@ streets_original, streets_lower = load_streets_dict(STREETS_FILE)
 obj_mapping, obj_variants, obj_canons = load_object_canon_mapping(MAPPING_FILE)
 NUM_WORDS = load_dict(NUMERALS_FILE)
 
+# --- ДОБАВЛЕНО: Создаем словарь лемм для mapping объектов ---
+# Ключ - лемма варианта, значение - каноническое название (через mapping)
+variant_lemmas = {}
+for v in obj_variants:
+    v_lemma = morph.parse(v)[0].normal_form
+    variant_lemmas[v_lemma] = obj_mapping[v]
+
 # --- Функции из твоего монолита ---
-def find_canonical_object(text, mapping, variants):
-    text_low = text.lower()
-    for variant in sorted(variants, key=len, reverse=True):
-        if re.search(rf'\b{re.escape(variant)}\b', text_low):
-            return mapping[variant]
+# (Оставил прежние ваши функции, см. ниже новую find_canonical_object_lemmatized)
+
+def find_canonical_object_lemmatized(text, variant_lemmas):
+    """
+    Обходит слова текста, лемматизирует, ищет среди подготовленных лемм mapping.
+    """
+    words = re.findall(r'\w+', text.lower())
+    words_lemmas = [morph.parse(w)[0].normal_form for w in words]
+    for lemma in words_lemmas:
+        if lemma in variant_lemmas:
+            return variant_lemmas[lemma]
     return None
 
 def build_special_object_patterns(canons):
@@ -106,7 +122,6 @@ def build_special_object_patterns(canons):
         rf'(?P<num>{numpat})\s*(?P<object>{objpat})\b',
         re.IGNORECASE)
     return [pattern1, pattern2]
-
 obj_patterns = build_special_object_patterns(obj_canons)
 
 def lemmatize_word(word):
@@ -237,8 +252,8 @@ async def extract_address(audio: UploadFile = File(...)):
     )
     text = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
 
-    # 1. mapping
-    label = find_canonical_object(text, obj_mapping, obj_variants)
+    # 1. mapping через ЛЕММАТИЗИРОВАННЫЙ поиск!!!
+    label = find_canonical_object_lemmatized(text, variant_lemmas)
     if label:
         return {"result": label, "asr": text}
 
