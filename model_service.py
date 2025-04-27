@@ -91,27 +91,58 @@ streets_original, streets_lower = load_streets_dict(STREETS_FILE)
 obj_mapping, obj_variants, obj_canons = load_object_canon_mapping(MAPPING_FILE)
 NUM_WORDS = load_dict(NUMERALS_FILE)
 
-# --- ДОБАВЛЕНО: Создаем словарь лемм для mapping объектов ---
-# Ключ - лемма варианта, значение - каноническое название (через mapping)
-variant_lemmas = {}
-for v in obj_variants:
-    v_lemma = morph.parse(v)[0].normal_form
-    variant_lemmas[v_lemma] = obj_mapping[v]
+# --- Ликбез: стандартная лемматизация слова
+def lemmatize_word(word):
+    cleaned = re.sub(r'[^а-яё-]', '', word.lower())
+    if not cleaned:
+        return word
+    return morph.parse(cleaned)[0].normal_form
 
-# --- Функции из твоего монолита ---
-# (Оставил прежние ваши функции, см. ниже новую find_canonical_object_lemmatized)
-
-def find_canonical_object_lemmatized(text, variant_lemmas):
-    """
-    Обходит слова текста, лемматизирует, ищет среди подготовленных лемм mapping.
-    """
-    words = re.findall(r'\w+', text.lower())
-    words_lemmas = [morph.parse(w)[0].normal_form for w in words]
-    for lemma in words_lemmas:
-        if lemma in variant_lemmas:
-            return variant_lemmas[lemma]
+# --- Функция для извлечения числительного числа из текста (support phrase, not single word only!)
+def extract_number(words, NUM_WORDS):
+    # Принимает строку из 1-3 слов (или одно слово)
+    w = words.lower()
+    w = w.replace('-', ' ')
+    # Прямо число
+    mnum = re.match(r"(\d+)", w)
+    if mnum:
+        return int(mnum.group(1))
+    # Проверим, есть ли в NUM_WORDS как есть (аксептирует, например, 'двадцать три')
+    if w in NUM_WORDS:
+        return NUM_WORDS[w]
+    # Попробуем по частям (например, "двадцать третья" => "двадцать три")
+    parts = w.split()
+    for n in range(len(parts), 0, -1):
+        sub = " ".join(parts[:n])
+        if sub in NUM_WORDS:
+            return NUM_WORDS[sub]
     return None
 
+# --- Поиск по n-грамме и лемматизации (имена объектов)
+def make_lemma(s):
+    return ' '.join(lemmatize_word(w) for w in re.findall(r'\w+', s.lower()))
+
+variant_lemmas_phrase = {}
+for v in obj_variants:
+    l = make_lemma(v)
+    if len(l.replace(' ', '')) >= 4:  # защита от коротких лемм (см. комментарий выше)
+        variant_lemmas_phrase[l] = obj_mapping[v]
+
+def find_canonical_object_ngram(text, variant_lemmas):
+    words = re.findall(r'\w+', text.lower())
+    if not words:
+        return None
+    ngram_min = 1
+    ngram_max = max(len(l.split()) for l in variant_lemmas)
+    for n in range(ngram_max, ngram_min-1, -1):
+        for i in range(len(words)-n+1):
+            frag = words[i:i+n]
+            frag_lemma = ' '.join(lemmatize_word(w) for w in frag)
+            if frag_lemma in variant_lemmas:
+                return variant_lemmas[frag_lemma]
+    return None
+
+# --- спец паттерны объектов c номерами
 def build_special_object_patterns(canons):
     objpat = '|'.join([re.escape(x) for x in sorted(canons, key=len, reverse=True)])
     numpat = r'(\d+|[а-яё\- ]+)'
@@ -124,73 +155,56 @@ def build_special_object_patterns(canons):
     return [pattern1, pattern2]
 obj_patterns = build_special_object_patterns(obj_canons)
 
-def lemmatize_word(word):
-    cleaned = re.sub(r'[^а-яё-]', '', word.lower())
-    if not cleaned:
-        return word
-    return morph.parse(cleaned)[0].normal_form
-
-def wordnum_to_int(word, NUM_WORDS):
-    word_clean = word.lower().replace("-", " ").replace("ё", "е").strip()
-    if word_clean in NUM_WORDS:
-        return NUM_WORDS[word_clean]
-    total = 0
-    for w in word_clean.split():
-        if w in NUM_WORDS:
-            total += NUM_WORDS[w]
-    if total:
-        return total
-    return None
-
-def extract_number(word, NUM_WORDS):
-    w = word.lower()
-    mnum = re.match(r"(\d+)", w)
-    if mnum:
-        return int(mnum.group(1))
-    w = re.sub(r'[-–—]?(й|я|е|ая|ое|ый|ий|ую|ой|ем|ым|ом|их|ыми|ого|ий|ие|ье|ая)?$', '', w)
-    if w.isdigit():
-        return int(w)
-    n = wordnum_to_int(w, NUM_WORDS)
-    return n
-
-def find_special_object(text, patterns, NUM_WORDS, canons_set=None):
-    text_low = text.lower()
-    words = text_low.split()
+# --- Новый функционал: поиск "поликлиника" с номером!
+def extract_object_with_number(
+    text,
+    object_keywords,
+    NUM_WORDS
+):
+    """
+    Ищет объект (например, поликлиника) с числом до или после (в числовом или словесном виде)
+    Вернет например: 'поликлиника 25'
+    object_keywords — список ключевых слов, например ['поликлиника']
+    """
+    words = re.findall(r'\w+', text.lower())
     lemmas = [lemmatize_word(w) for w in words]
-    if canons_set is not None:
-        for i in range(len(words) - 1):
-            obj_candidate = lemmas[i+1]
-            num_candidate = extract_number(words[i], NUM_WORDS)
-            for obj in canons_set:
-                obj_lemma = lemmatize_word(obj)
-                if obj_candidate == obj_lemma and num_candidate:
-                    return f"{obj} {num_candidate}"
-        for i in range(len(words) - 1):
-            obj_candidate = lemmas[i]
-            num_candidate = extract_number(words[i+1], NUM_WORDS)
-            for obj in canons_set:
-                obj_lemma = lemmatize_word(obj)
-                if obj_candidate == obj_lemma and num_candidate:
-                    return f"{obj} {num_candidate}"
-        for i, lemma in enumerate(lemmas):
-            for obj in canons_set:
-                if lemma == lemmatize_word(obj):
-                    return obj
-    for pattern in patterns:
-        for match in pattern.finditer(text):
-            gd = match.groupdict()
-            obj_type = gd.get('object')
-            num_raw = gd.get('num')
-            if obj_type and num_raw:
-                obj_type = obj_type.lower()
-                num = extract_number(num_raw, NUM_WORDS)
-                if num:
-                    label = f"{obj_type} {num}"
-                    return label
-                else:
-                    return f"{obj_type} {num_raw}"
+    # Собираем длины числовых выражений в NUM_WORDS
+    numerals = set(NUM_WORDS.keys())
+    max_numlen = max(len(n.split()) for n in numerals)
+    results = []
+    for idx, lemma in enumerate(lemmas):
+        # ищем ключевое слово среди объекта
+        for obj_word in object_keywords:
+            if lemma == lemmatize_word(obj_word):
+                # Смотрим после объекта
+                for shift in range(1, max_numlen+1):
+                    pos = idx + shift
+                    if pos >= len(words):
+                        break
+                    num_phrase = " ".join(words[idx+1:pos+1])
+                    num_digit = extract_number(num_phrase, NUM_WORDS)
+                    if num_digit:
+                        results.append(f"{obj_word} {num_digit}")
+                        break
+                # До объекта
+                for shift in range(1, max_numlen+1):
+                    pos = idx - shift
+                    if pos < 0:
+                        break
+                    num_phrase = " ".join(words[pos:idx])
+                    num_digit = extract_number(num_phrase, NUM_WORDS)
+                    if num_digit:
+                        results.append(f"{obj_word} {num_digit}")
+                        break
+                results.append(obj_word)
+    if results:
+        with_number = [r for r in results if re.search(r'\d+', r)]
+        if with_number:
+            return with_number[0]
+        return results[0]
     return None
 
+# --- Остальной твой NER и исправления (street/score), без изменений!
 def correct_street_name(name, streets_lower, streets_original, min_score=80):
     result = process.extractOne(name.lower(), streets_lower, scorer=fuzz.WRatio)
     if result:
@@ -252,15 +266,31 @@ async def extract_address(audio: UploadFile = File(...)):
     )
     text = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
 
-    # 1. mapping через ЛЕММАТИЗИРОВАННЫЙ поиск!!!
-    label = find_canonical_object_lemmatized(text, variant_lemmas)
+    # 0. КЕЙС "поликлиника N" (или аналогичные, можно ["школа", ...])
+    label = extract_object_with_number(text, ["поликлиника"], NUM_WORDS)
+    if label:
+        return {"result": label, "asr": text}
+
+    # 1. mapping (по имени)
+    label = find_canonical_object_ngram(text, variant_lemmas_phrase)
     if label:
         return {"result": label, "asr": text}
 
     # 2. спец-объекты с номерами
-    label = find_special_object(text, obj_patterns, NUM_WORDS, obj_canons)
-    if label:
-        return {"result": label, "asr": text}
+    # Используй только если у тебя есть соответствующие шаблоны и mapping
+    for pattern in obj_patterns:
+        for match in pattern.finditer(text):
+            gd = match.groupdict()
+            obj_type = gd.get('object')
+            num_raw = gd.get('num')
+            if obj_type and num_raw:
+                obj_type = obj_type.lower()
+                num = extract_number(num_raw, NUM_WORDS)
+                if num:
+                    label = f"{obj_type} {num}"
+                    return {"result": label, "asr": text}
+                else:
+                    return {"result": f"{obj_type} {num_raw}", "asr": text}
 
     # 3. улица-дом-корпус (entity-постпроцесс)
     ents = extract_address_entities(text, ner_pipe)
