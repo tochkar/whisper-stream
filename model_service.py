@@ -38,7 +38,7 @@ torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 HF_TOKEN = os.environ["HF_TOKEN"]
 
 # --- КЛЮЧЕВЫЕ ОБЪЕКТЫ (для числительных)
-OBJECTS_WITH_NUMBER = ["поликлиника", "школа", "гимназия", "детский сад", "больница", "родильный дом"]
+OBJECTS_WITH_NUMBER = ["поликлиника", "школа", "гимназия", "детский сад", "больница", "роддом", "улица Белградская"]
 
 app = FastAPI()
 morph = pymorphy2.MorphAnalyzer()
