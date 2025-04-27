@@ -26,7 +26,6 @@ import pymorphy2
 import re
 from rapidfuzz import process, fuzz
 
-# --- ГЛАВНЫЕ ПАРАМЕТРЫ ---
 MODEL_NAME = "openai/whisper-large-v3-turbo"
 LANGUAGE = "ru"
 NER_MODEL = "aidarmusin/address-ner-ru"
@@ -39,7 +38,7 @@ torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 HF_TOKEN = os.environ["HF_TOKEN"]
 
 # --- КЛЮЧЕВЫЕ ОБЪЕКТЫ, для которых ищем числовой номер ---
-OBJECTS_WITH_NUMBER = ["поликлиника", "школа", "гимназия", "детский сад", "больница", "роддом"]
+OBJECTS_WITH_NUMBER = ["поликлиника", "школа", "гимназия", "детский сад", "больница", "роддом" ]
 
 app = FastAPI()
 morph = pymorphy2.MorphAnalyzer()
@@ -148,63 +147,46 @@ def build_special_object_patterns(canons):
     return [pattern1, pattern2]
 obj_patterns = build_special_object_patterns(obj_canons)
 
-# --- Улучшенная функция! Ищет объект + число в любом падеже и порядке ---
+# --- УНИВЕРСАЛЬНАЯ ФУНКЦИЯ для "третьей поликлиники", "в пятом детском саду", "25 школа" и т.д.
 def extract_object_with_number(text, object_keywords, NUM_WORDS):
     words = re.findall(r'\w+', text.lower())
     lemmas = [lemmatize_word(w) for w in words]
-    # Сравниваем всё в lowercase и лемматизированном виде. Для "детский сад" делаем отдельную обработку:
-    simple_objects = [obj for obj in object_keywords if " " not in obj]
-    mulword_objects = [obj for obj in object_keywords if " " in obj]
-    object_lemmas = set([lemmatize_word(obj) for obj in simple_objects])
-    # Проверка для двусловных названий типа "детский сад":
-    mulword_obj_lemmas = [" ".join(lemmatize_word(w) for w in obj.split()) for obj in mulword_objects]
+    number_found = None
+    object_found = None
 
-    # Сначала обработаем окна для двусловных объектов:
-    for i in range(len(words)-1):
-        word_pair = words[i:i+2]
-        lemma_pair = " ".join(lemmatize_word(w) for w in word_pair)
-        if lemma_pair in mulword_obj_lemmas:
-            # Число до или после пары:
-            before = extract_number(words[i-1], NUM_WORDS) if i-1 >= 0 else None
-            after = extract_number(words[i+2], NUM_WORDS) if i+2 < len(words) else None
-            obj_return = object_keywords[mulword_obj_lemmas.index(lemma_pair) + len(simple_objects)]
-            if before:
-                return f"{obj_return} {before}"
-            if after:
-                return f"{obj_return} {after}"
-            return obj_return
+    # работаем с односоставными и двусоставными объектами (например, детский сад)
+    for win in [3, 2]:
+        for i in range(len(words) - win + 1):
+            window = words[i:i+win]
+            window_lemmas = [lemmatize_word(w) for w in window]
+            for obj in object_keywords:
+                obj_words = obj.split()
+                obj_lemmas = [lemmatize_word(w) for w in obj_words]
+                # односоставные объекты
+                if len(obj_lemmas) == 1:
+                    for idx, lemma in enumerate(window_lemmas):
+                        if lemma == obj_lemmas[0]:
+                            for j, w in enumerate(window):
+                                if j == idx:
+                                    continue
+                                num = extract_number(w, NUM_WORDS)
+                                if num:
+                                    return f"{obj} {num}"
+                            object_found = obj
+                # двусоставные (детский сад)
+                elif len(obj_lemmas) == 2 and win >= 2:
+                    for k in range(len(window_lemmas)-1):
+                        if window_lemmas[k] == obj_lemmas[0] and window_lemmas[k+1] == obj_lemmas[1]:
+                            before = extract_number(window[k-1], NUM_WORDS) if k-1 >= 0 else None
+                            after = extract_number(window[k+2], NUM_WORDS) if k+2 < len(window) else None
+                            if before:
+                                return f"{obj} {before}"
+                            if after:
+                                return f"{obj} {after}"
+                            object_found = obj
 
-    # Далее работаем с однословными ("поликлиника", "школа", "гимназия")
-    for i in range(len(words)):
-        for win in [2, 3]:
-            if i + win <= len(words):
-                win_words = words[i:i+win]
-                win_lemmas = [lemmatize_word(w) for w in win_words]
-                obj_idx = None
-                num_idx = None
-                for idx, lemma in enumerate(win_lemmas):
-                    if lemma in object_lemmas:
-                        obj_idx = idx
-                    if extract_number(win_words[idx], NUM_WORDS):
-                        num_idx = idx
-                if obj_idx is not None and num_idx is not None:
-                    obj = simple_objects[0]
-                    for so in simple_objects:
-                        if win_lemmas[obj_idx] == lemmatize_word(so):
-                            obj = so
-                            break
-                    num = extract_number(win_words[num_idx], NUM_WORDS)
-                    return f"{obj} {num}"
-    # Если ничего не нашли, проверить отдельно есть ли объект (по всем)
-    for lemma in lemmas:
-        for so in simple_objects:
-            if lemma == lemmatize_word(so):
-                return so
-    for i in range(len(words)-1):
-        lemma_pair = " ".join(lemmatize_word(w) for w in words[i:i+2])
-        for mobj, mlem in zip(mulword_objects, mulword_obj_lemmas):
-            if lemma_pair == mlem:
-                return mobj
+    if object_found:
+        return object_found
     return None
 
 def correct_street_name(name, streets_lower, streets_original, min_score=80):
@@ -268,7 +250,7 @@ async def extract_address(audio: UploadFile = File(...)):
     )
     text = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
 
-    # 0. Кейсы "поликлиника N", "школа N", "гимназия N", "детский сад N"
+    # 0. Кейсы "поликлиника N", "школа N", "гимназия N", "детский сад N", в любом падеже!
     label = extract_object_with_number(text, OBJECTS_WITH_NUMBER, NUM_WORDS)
     if label:
         return {"result": label, "asr": text}
