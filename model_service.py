@@ -37,8 +37,8 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 HF_TOKEN = os.environ["HF_TOKEN"]
 
-# --- КЛЮЧЕВЫЕ ОБЪЕКТЫ, для которых ищем числовой номер ---
-OBJECTS_WITH_NUMBER = ["поликлиника", "школа", "гимназия", "детский сад", "больница", "родильный дом" ]
+# --- КЛЮЧЕВЫЕ ОБЪЕКТЫ (для числительных)
+OBJECTS_WITH_NUMBER = ["поликлиника", "школа", "гимназия", "детский сад", "больница", "родильный дом"]
 
 app = FastAPI()
 morph = pymorphy2.MorphAnalyzer()
@@ -147,14 +147,11 @@ def build_special_object_patterns(canons):
     return [pattern1, pattern2]
 obj_patterns = build_special_object_patterns(obj_canons)
 
-# --- УНИВЕРСАЛЬНАЯ ФУНКЦИЯ для "третьей поликлиники", "в пятом детском саду", "25 школа" и т.д.
+# Универсальная функция для любого падежа и порядка объектов/числительных
 def extract_object_with_number(text, object_keywords, NUM_WORDS):
     words = re.findall(r'\w+', text.lower())
     lemmas = [lemmatize_word(w) for w in words]
-    number_found = None
     object_found = None
-
-    # работаем с односоставными и двусоставными объектами (например, детский сад)
     for win in [3, 2]:
         for i in range(len(words) - win + 1):
             window = words[i:i+win]
@@ -173,7 +170,7 @@ def extract_object_with_number(text, object_keywords, NUM_WORDS):
                                 if num:
                                     return f"{obj} {num}"
                             object_found = obj
-                # двусоставные (детский сад)
+                # двусоставные объекты ("детский сад", "родильный дом")
                 elif len(obj_lemmas) == 2 and win >= 2:
                     for k in range(len(window_lemmas)-1):
                         if window_lemmas[k] == obj_lemmas[0] and window_lemmas[k+1] == obj_lemmas[1]:
@@ -184,7 +181,6 @@ def extract_object_with_number(text, object_keywords, NUM_WORDS):
                             if after:
                                 return f"{obj} {after}"
                             object_found = obj
-
     if object_found:
         return object_found
     return None
@@ -248,9 +244,17 @@ async def extract_address(audio: UploadFile = File(...)):
         top_k=100, top_p=0.15,
         no_repeat_ngram_size=2
     )
-    text = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
+    text = tokenizer.decode(predicted_ids[0], skip_special_tokens=True).strip()
+    
+    # Проверка: если только одно слово из street_types — result = ''
+    street_types = ['проспект', 'улица', 'аллея', 'переулок']
+    words = re.findall(r'\w+', text.lower())
+    only_word = len(words) == 1 and words[0] in street_types
+    too_short = len(text.strip()) < 4
+    if only_word or too_short:
+        return {"result": "", "asr": text}
 
-    # 0. Кейсы "поликлиника N", "школа N", "гимназия N", "детский сад N", в любом падеже!
+    # 0. Кейсы с объектами и числительными
     label = extract_object_with_number(text, OBJECTS_WITH_NUMBER, NUM_WORDS)
     if label:
         return {"result": label, "asr": text}
@@ -260,7 +264,7 @@ async def extract_address(audio: UploadFile = File(...)):
     if label:
         return {"result": label, "asr": text}
 
-    # 2. спец-объекты с номерами (по шаблонам)
+    # 2. спец паттерны
     for pattern in obj_patterns:
         for match in pattern.finditer(text):
             gd = match.groupdict()
