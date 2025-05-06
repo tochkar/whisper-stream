@@ -7,8 +7,7 @@ MQTT_PORT = 443
 MQTT_USERNAME = "admin"
 MQTT_PASSWORD = "6BHK2pGn3d"
 MQTT_CLIENT_ID = "ai_service"
-DISPATCHER_ID = 1001
-MQTT_TOPIC = f"dispatcher/{DISPATCHER_ID}/input/ai/"
+MQTT_TOPIC = f"ai/recognize/taxi"
 
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
@@ -47,8 +46,6 @@ if not connected:
 payload = json.dumps({"test": "message", "number": 123, "status": "ok"})
 print(f"Публикуем: {payload}")
 client.publish(MQTT_TOPIC, payload)
-
-print("\nКлиент останется работать и слушать топики (нажмите Ctrl+C для выхода)\n")
 
 try:
     while True:
