@@ -13,8 +13,6 @@ MQTT_TOPIC = f"dispatcher/{DISPATCHER_ID}/input/ai/"
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
         print("Соединение с брокером установлено!")
-        # Пример подписки на этот же топик:
-        # client.subscribe(MQTT_TOPIC)
     else:
         print(f"Ошибка соединения: {rc}")
 
