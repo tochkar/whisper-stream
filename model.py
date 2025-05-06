@@ -7,7 +7,7 @@ import torch
 import numpy as np
 import os
 import inspect
-# --- Shim для Python 3.11+/3.12+, чтобы pymorphy2 работал с getargspec ---
+# --- Shim  ---
 if not hasattr(inspect, 'getargspec'):
     def getargspec(func):
         from collections import namedtuple
@@ -35,14 +35,13 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 HF_TOKEN = os.environ["HF_TOKEN"]
 
-# --- Загрузка ключевых объектов из файла ---
 def load_objects_with_number(fname):
     with open(fname, encoding="utf-8") as f:
         return [x.strip() for x in f if x.strip()]
 
 OBJECTS_WITH_NUMBER = load_objects_with_number('objects_with_number.txt')
 
-# --- Фильтр результата ---
+# --- Result Filter ---
 def is_bad_result(result):
     if not result:
         return True
@@ -51,8 +50,6 @@ def is_bad_result(result):
     if result.replace(' ', '').isdigit():
         return True
     return False
-
-# --- КОНЕЦ импортов и фильтров, остальные функции не менялись ---
 
 app = FastAPI()
 morph = pymorphy2.MorphAnalyzer()
@@ -171,7 +168,7 @@ def extract_object_with_number(text, object_keywords, NUM_WORDS):
             for obj in object_keywords:
                 obj_words = obj.split()
                 obj_lemmas = [lemmatize_word(w) for w in obj_words]
-                # односоставные объекты
+                # simple objects
                 if len(obj_lemmas) == 1:
                     for idx, lemma in enumerate(window_lemmas):
                         if lemma == obj_lemmas[0]:
@@ -182,7 +179,7 @@ def extract_object_with_number(text, object_keywords, NUM_WORDS):
                                 if num:
                                     return f"{obj} {num}"
                             object_found = obj
-                # двусоставные объекты ("детский сад", "родильный дом")
+                # complex objects
                 elif len(obj_lemmas) == 2 and win >= 2:
                     for k in range(len(window_lemmas)-1):
                         if window_lemmas[k] == obj_lemmas[0] and window_lemmas[k+1] == obj_lemmas[1]:
@@ -257,7 +254,7 @@ async def extract_address(audio: UploadFile = File(...)):
         no_repeat_ngram_size=2
     )
     text = tokenizer.decode(predicted_ids[0], skip_special_tokens=True).strip()
-    # Проверка: если только одно слово из street_types — result = ''
+   
     street_types = ['проспект', 'улица', 'аллея', 'переулок']
     words = re.findall(r'\w+', text.lower())
     only_word = len(words) == 1 and words[0] in street_types
@@ -265,17 +262,16 @@ async def extract_address(audio: UploadFile = File(...)):
     if only_word or too_short:
         return {"result": "", "asr": text}
 
-    # 0. Кейсы с объектами и числительными
     label = extract_object_with_number(text, OBJECTS_WITH_NUMBER, NUM_WORDS)
     if label and not is_bad_result(label):
         return {"result": label, "asr": text}
 
-    # 1. mapping (по имени)
+    # 1. mapping
     label = find_canonical_object_ngram(text, variant_lemmas_phrase)
     if label and not is_bad_result(label):
         return {"result": label, "asr": text}
 
-    # 2. спец паттерны
+    # 2. patterns
     for pattern in obj_patterns:
         for match in pattern.finditer(text):
             gd = match.groupdict()
@@ -293,7 +289,7 @@ async def extract_address(audio: UploadFile = File(...)):
                 else:
                     return {"result": "", "asr": text}
 
-    # 3. NER типа улица-дом-корпус
+    # 3. NER model
     ents = extract_address_entities(text, ner_pipe)
     selected = extract_selected_attributes(ents, attributes=NER_ATTRS)
     selected = correct_address(selected, streets_lower, streets_original)
