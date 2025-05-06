@@ -28,9 +28,9 @@ MODEL_NAME = "openai/whisper-large-v3-turbo"
 LANGUAGE = "ru"
 NER_MODEL = "aidarmusin/address-ner-ru"
 NER_ATTRS = ["Street", "House", "Building"]
-STREETS_FILE = "minsk_unique_streets2.txt"
-MAPPING_FILE = "important_objects_mapping.txt"
-NUMERALS_FILE = "russian_numerals.txt"
+STREETS_FILE = "streets/minsk_unique_streets2.txt"
+MAPPING_FILE = "streets/important_objects_mapping.txt"
+NUMERALS_FILE = "streets/russian_numerals2.txt"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 HF_TOKEN = os.environ["HF_TOKEN"]
@@ -39,7 +39,7 @@ def load_objects_with_number(fname):
     with open(fname, encoding="utf-8") as f:
         return [x.strip() for x in f if x.strip()]
 
-OBJECTS_WITH_NUMBER = load_objects_with_number('objects_with_number.txt')
+OBJECTS_WITH_NUMBER = load_objects_with_number('streets/objects_with_number.txt')
 
 # --- Result Filter ---
 def is_bad_result(result):
